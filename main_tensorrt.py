@@ -12,7 +12,7 @@ import cupy as cp
 # Could be do with
 # from config import *
 # But we are writing it out for clarity for new devs
-from config import aaMovementAmp, useMask, maskHeight, maskWidth, aaQuitKey, confidence, headshot_mode, cpsDisplay, visuals, centerOfScreen, screenShotWidth
+from config import aaMovementAmp, useMask, maskHeight, maskWidth, aaQuitKey, confidence, headshot_mode, cpsDisplay, visuals, centerOfScreen, screenShotWidth, aaActivateKey, aaTargetPart, aaSmoothFactor, aaFOV
 import gameSelection
 
 def main():
@@ -99,23 +99,43 @@ def main():
                         targets.iloc[:, [0, 1]].values - targets.iloc[:, [4, 5]], axis=1)
                     targets.sort_values(by="dist", ascending=False)
 
-                # Take the first person that shows up in the dataframe (Recall that we sort based on Euclidean distance)
-                xMid = targets.iloc[0].current_mid_x
-                yMid = targets.iloc[0].current_mid_y
+                # Filter targets by FOV if enabled
+                if aaFOV > 0 and "dist_from_center" in targets.columns:
+                    targets = targets[targets["dist_from_center"] <= aaFOV]
 
-                box_height = targets.iloc[0].height
-                if headshot_mode:
-                    headshot_offset = box_height * 0.38
+                if len(targets) > 0:
+                    # Take the first person that shows up in the dataframe (Recall that we sort based on Euclidean distance)
+                    xMid = targets.iloc[0].current_mid_x
+                    yMid = targets.iloc[0].current_mid_y
+
+                    box_height = targets.iloc[0].height
+
+                    # Calculate aim point based on target part selection
+                    if aaTargetPart == "head":
+                        headshot_offset = box_height * 0.38
+                    elif aaTargetPart == "body":
+                        headshot_offset = box_height * 0.1
+                    elif aaTargetPart == "nearest":
+                        headshot_offset = 0
+                    else:
+                        if headshot_mode:
+                            headshot_offset = box_height * 0.38
+                        else:
+                            headshot_offset = box_height * 0.2
+
+                    mouseMove = [xMid - cWidth, (yMid - headshot_offset) - cHeight]
+
+                    # Apply smoothing
+                    smoothedX = mouseMove[0] * aaMovementAmp / aaSmoothFactor
+                    smoothedY = mouseMove[1] * aaMovementAmp / aaSmoothFactor
+
+                    # Moving the mouse only when the aim key is held down
+                    if win32api.GetAsyncKeyState(aaActivateKey) < 0:
+                        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(
+                            smoothedX), int(smoothedY), 0, 0)
+                    last_mid_coord = [xMid, yMid]
                 else:
-                    headshot_offset = box_height * 0.2
-
-                mouseMove = [xMid - cWidth, (yMid - headshot_offset) - cHeight]
-
-                # Moving the mouse
-                if win32api.GetKeyState(0x14):
-                    win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(
-                        mouseMove[0] * aaMovementAmp), int(mouseMove[1] * aaMovementAmp), 0, 0)
-                last_mid_coord = [xMid, yMid]
+                    last_mid_coord = None
 
             else:
                 last_mid_coord = None
