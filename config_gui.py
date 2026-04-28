@@ -34,6 +34,13 @@ TARGET_OPTIONS = {
 }
 TARGET_VALUE_TO_NAME = {v: k for k, v in TARGET_OPTIONS.items()}
 
+# Mouse movement method options
+MOUSE_METHOD_OPTIONS = {
+    "win32 (默认)": "win32",
+    "ddxoft (虚拟驱动)": "ddxoft",
+}
+MOUSE_METHOD_VALUE_TO_NAME = {v: k for k, v in MOUSE_METHOD_OPTIONS.items()}
+
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
 
 
@@ -63,6 +70,11 @@ def read_config():
     config["cpsDisplay"] = extract("cpsDisplay", "True", str)
     config["screenShotHeight"] = extract("screenShotHeight", 320, int)
     config["screenShotWidth"] = extract("screenShotWidth", 320, int)
+    config["mouseMovementMethod"] = extract("mouseMovementMethod", "win32", str)
+    config["aaDeadZone"] = extract("aaDeadZone", 5, int)
+    config["stickyAimEnabled"] = extract("stickyAimEnabled", "True", str)
+    config["stickyAimFrames"] = extract("stickyAimFrames", 8, int)
+    config["stickyAimTrackRadius"] = extract("stickyAimTrackRadius", 100, int)
 
     # aaActivateKey needs special handling (hex value)
     match = re.search(r'^aaActivateKey\s*=\s*(.+)$', content, re.MULTILINE)
@@ -104,6 +116,13 @@ def write_config(config):
     content = replace_val(content, "confidence", config["confidence"])
     content = replace_val(content, "screenShotHeight", config["screenShotHeight"])
     content = replace_val(content, "screenShotWidth", config["screenShotWidth"])
+    content = replace_val(content, "mouseMovementMethod", config["mouseMovementMethod"])
+    content = replace_val(content, "aaDeadZone", config["aaDeadZone"])
+
+    sticky_str = "True" if config["stickyAimEnabled"] else "False"
+    content = re.sub(r'^stickyAimEnabled\s*=\s*.+$', f'stickyAimEnabled = {sticky_str}', content, flags=re.MULTILINE)
+    content = replace_val(content, "stickyAimFrames", config["stickyAimFrames"])
+    content = replace_val(content, "stickyAimTrackRadius", config["stickyAimTrackRadius"])
 
     vis_str = "True" if config["visuals"] else "False"
     content = re.sub(r'^visuals\s*=\s*.+$', f'visuals = {vis_str}', content, flags=re.MULTILINE)
@@ -315,6 +334,87 @@ class ConfigGUI:
         ss_hint = ttk.Label(det_frame, text="(越大检测范围越大但越慢，推荐 320)", font=("Microsoft YaHei UI", 8))
         ss_hint.pack(anchor="w")
 
+        # ============ Mouse & Anti-Jitter Section ============
+        mouse_frame = ttk.LabelFrame(main_frame, text="  鼠标与防抖设置  ", padding=15)
+        mouse_frame.pack(fill="x", pady=(0, 10))
+
+        # --- Mouse Movement Method ---
+        row_mm = ttk.Frame(mouse_frame)
+        row_mm.pack(fill="x", pady=4)
+        ttk.Label(row_mm, text="鼠标移动方式:").pack(side="left")
+        self.mouse_method_var = tk.StringVar()
+        current_method = self.config.get("mouseMovementMethod", "win32")
+        self.mouse_method_var.set(MOUSE_METHOD_VALUE_TO_NAME.get(current_method, "win32 (默认)"))
+        mouse_method_combo = ttk.Combobox(row_mm, textvariable=self.mouse_method_var,
+                                           values=list(MOUSE_METHOD_OPTIONS.keys()),
+                                           state="readonly", width=25)
+        mouse_method_combo.pack(side="right")
+        mm_hint = ttk.Label(mouse_frame, text="(ddxoft 需要管理员权限 + ddxoft.dll)", font=("Microsoft YaHei UI", 8))
+        mm_hint.pack(anchor="w")
+
+        # --- Dead Zone ---
+        row_dz = ttk.Frame(mouse_frame)
+        row_dz.pack(fill="x", pady=4)
+        ttk.Label(row_dz, text="死区 (Dead Zone):").pack(side="left")
+        self.dz_label = ttk.Label(row_dz, text=str(self.config.get("aaDeadZone", 5)))
+        self.dz_label.pack(side="right", padx=(10, 0))
+
+        self.dz_var = tk.IntVar(value=self.config.get("aaDeadZone", 5))
+        dz_scale = tk.Scale(mouse_frame, from_=0, to=20, orient="horizontal",
+                             variable=self.dz_var, length=350,
+                             bg=self.bg, fg=self.fg, troughcolor=self.entry_bg,
+                             highlightbackground=self.bg, activebackground=self.accent,
+                             font=("Microsoft YaHei UI", 9),
+                             command=lambda v: self.dz_label.configure(text=str(int(float(v)))))
+        dz_scale.pack(fill="x", pady=(0, 4))
+        dz_hint = ttk.Label(mouse_frame, text="(像素，小于此距离不移动准星，防止静止目标抖动。推荐 3~8)", font=("Microsoft YaHei UI", 8))
+        dz_hint.pack(anchor="w")
+
+        # ============ Sticky Aim Section ============
+        sticky_frame = ttk.LabelFrame(main_frame, text="  目标锁定 (防跳转)  ", padding=15)
+        sticky_frame.pack(fill="x", pady=(0, 10))
+
+        self.sticky_var = tk.BooleanVar(value=self.config.get("stickyAimEnabled", "True") == "True")
+        ttk.Checkbutton(sticky_frame, text="启用目标锁定 (Sticky Aim)", variable=self.sticky_var).pack(anchor="w", pady=2)
+        sticky_hint = ttk.Label(sticky_frame, text="(锁定最近目标，不会在多个目标之间跳转)", font=("Microsoft YaHei UI", 8))
+        sticky_hint.pack(anchor="w")
+
+        # --- Sticky Aim Frames ---
+        row_sf = ttk.Frame(sticky_frame)
+        row_sf.pack(fill="x", pady=4)
+        ttk.Label(row_sf, text="切换等待帧数:").pack(side="left")
+        self.sf_label = ttk.Label(row_sf, text=str(self.config.get("stickyAimFrames", 8)))
+        self.sf_label.pack(side="right", padx=(10, 0))
+
+        self.sf_var = tk.IntVar(value=self.config.get("stickyAimFrames", 8))
+        sf_scale = tk.Scale(sticky_frame, from_=1, to=30, orient="horizontal",
+                             variable=self.sf_var, length=350,
+                             bg=self.bg, fg=self.fg, troughcolor=self.entry_bg,
+                             highlightbackground=self.bg, activebackground=self.accent,
+                             font=("Microsoft YaHei UI", 9),
+                             command=lambda v: self.sf_label.configure(text=str(int(float(v)))))
+        sf_scale.pack(fill="x", pady=(0, 4))
+        sf_hint = ttk.Label(sticky_frame, text="(目标消失多少帧后才切换，越大越不容易切换。推荐 5~15)", font=("Microsoft YaHei UI", 8))
+        sf_hint.pack(anchor="w")
+
+        # --- Sticky Aim Track Radius ---
+        row_sr = ttk.Frame(sticky_frame)
+        row_sr.pack(fill="x", pady=4)
+        ttk.Label(row_sr, text="跟踪半径:").pack(side="left")
+        self.sr_label = ttk.Label(row_sr, text=str(self.config.get("stickyAimTrackRadius", 100)))
+        self.sr_label.pack(side="right", padx=(10, 0))
+
+        self.sr_var = tk.IntVar(value=self.config.get("stickyAimTrackRadius", 100))
+        sr_scale = tk.Scale(sticky_frame, from_=20, to=300, orient="horizontal",
+                             variable=self.sr_var, length=350,
+                             bg=self.bg, fg=self.fg, troughcolor=self.entry_bg,
+                             highlightbackground=self.bg, activebackground=self.accent,
+                             font=("Microsoft YaHei UI", 9),
+                             command=lambda v: self.sr_label.configure(text=str(int(float(v)))))
+        sr_scale.pack(fill="x", pady=(0, 4))
+        sr_hint = ttk.Label(sticky_frame, text="(像素，帧间同一目标的最大位移容忍。推荐 50~150)", font=("Microsoft YaHei UI", 8))
+        sr_hint.pack(anchor="w")
+
         # ============ Other Options ============
         opt_frame = ttk.LabelFrame(main_frame, text="  其他选项  ", padding=15)
         opt_frame.pack(fill="x", pady=(0, 15))
@@ -363,6 +463,11 @@ class ConfigGUI:
         ss = self.ss_var.get()
         config["screenShotHeight"] = ss
         config["screenShotWidth"] = ss
+        config["mouseMovementMethod"] = MOUSE_METHOD_OPTIONS.get(self.mouse_method_var.get(), "win32")
+        config["aaDeadZone"] = self.dz_var.get()
+        config["stickyAimEnabled"] = self.sticky_var.get()
+        config["stickyAimFrames"] = self.sf_var.get()
+        config["stickyAimTrackRadius"] = self.sr_var.get()
         return config
 
     def save_config(self):
@@ -388,6 +493,14 @@ class ConfigGUI:
         self.conf_label.configure(text="0.40")
         self.ss_var.set(320)
         self.ss_label.configure(text="320")
+        self.mouse_method_var.set("win32 (默认)")
+        self.dz_var.set(5)
+        self.dz_label.configure(text="5")
+        self.sticky_var.set(True)
+        self.sf_var.set(8)
+        self.sf_label.configure(text="8")
+        self.sr_var.set(100)
+        self.sr_label.configure(text="100")
         self.visuals_var.set(False)
         self.cps_var.set(True)
 

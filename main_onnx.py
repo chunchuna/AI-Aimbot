@@ -9,14 +9,28 @@ import win32con
 import pandas as pd
 from utils.general import (cv2, non_max_suppression, xyxy2xywh)
 import torch
-
-# Could be do with
-# from config import *
-# But we are writing it out for clarity for new devs
 from config import aaMovementAmp, useMask, maskHeight, maskWidth, aaQuitKey, confidence, headshot_mode, cpsDisplay, visuals, onnxChoice, centerOfScreen, aaActivateKey, aaTargetPart, aaSmoothFactor, aaFOV
+from config import mouseMovementMethod, aaDeadZone, stickyAimEnabled, stickyAimFrames, stickyAimTrackRadius
+from utils.ddxoft_mouse import ddxoft_instance
+import math
 import gameSelection
 
+def move_mouse(dx, dy):
+    """Move mouse using configured method (ddxoft or win32)."""
+    if mouseMovementMethod == "ddxoft" and ddxoft_instance.is_loaded:
+        ddxoft_instance.move_relative(dx, dy)
+    else:
+        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, dx, dy, 0, 0)
+
 def main():
+    # ===== Initialize ddxoft if configured =====
+    if mouseMovementMethod == "ddxoft":
+        print("[ddxoft] Attempting to load ddxoft virtual input driver...")
+        if ddxoft_instance.load():
+            print("[ddxoft] Driver loaded successfully. Using ddxoft for mouse movement.")
+        else:
+            print("[ddxoft] Failed to load driver. Falling back to win32 mouse_event.")
+
     # External Function for running the game selection menu (gameSelection.py)
     camera, cWidth, cHeight = gameSelection.gameSelection()
 
@@ -41,6 +55,10 @@ def main():
 
     # Used for colors drawn on bounding boxes
     COLORS = np.random.uniform(0, 255, size=(1500, 3))
+
+    # Sticky aim state
+    sticky_target = None       # (x, y, width, height) of locked target
+    sticky_miss_frames = 0     # consecutive frames target not found
 
     # Main loop Quit if Q is pressed
     last_mid_coord = None
@@ -122,54 +140,110 @@ def main():
                 # Sort the data frame by distance from center
                 targets = targets.sort_values("dist_from_center")
 
-            # Get the last persons mid coordinate if it exists
-            if last_mid_coord:
-                targets['last_mid_x'] = last_mid_coord[0]
-                targets['last_mid_y'] = last_mid_coord[1]
-                # Take distance between current person mid coordinate and last person mid coordinate
-                targets['dist'] = np.linalg.norm(
-                    targets.iloc[:, [0, 1]].values - targets.iloc[:, [4, 5]], axis=1)
-                targets.sort_values(by="dist", ascending=False)
-
             # Filter targets by FOV if enabled
             if aaFOV > 0 and "dist_from_center" in targets.columns:
                 targets = targets[targets["dist_from_center"] <= aaFOV]
 
             if len(targets) > 0:
-                # Take the first person that shows up in the dataframe (Recall that we sort based on Euclidean distance)
-                xMid = targets.iloc[0].current_mid_x
-                yMid = targets.iloc[0].current_mid_y
+                # ===== Sticky Aim: select target =====
+                chosen_idx = 0  # default: closest to center (already sorted)
+                goto_visuals = False
 
-                box_height = targets.iloc[0].height
+                if stickyAimEnabled and sticky_target is not None:
+                    # Try to find the locked target in current detections
+                    best_match_idx = -1
+                    best_match_dist = float('inf')
+                    st_x, st_y, st_w, st_h = sticky_target
 
-                # Calculate aim point based on target part selection
-                if aaTargetPart == "head":
-                    headshot_offset = box_height * 0.38
-                elif aaTargetPart == "body":
-                    headshot_offset = box_height * 0.1
-                elif aaTargetPart == "nearest":
-                    headshot_offset = 0
-                else:
-                    if headshot_mode:
-                        headshot_offset = box_height * 0.38
+                    for idx in range(len(targets)):
+                        row = targets.iloc[idx]
+                        dx = row.current_mid_x - st_x
+                        dy = row.current_mid_y - st_y
+                        dist = math.sqrt(dx * dx + dy * dy)
+
+                        # Also check size similarity
+                        if st_w > 0 and row.width > 0:
+                            size_ratio = min(row.width, st_w) / max(row.width, st_w)
+                            if size_ratio < 0.4:
+                                continue
+
+                        if dist < stickyAimTrackRadius and dist < best_match_dist:
+                            best_match_dist = dist
+                            best_match_idx = idx
+
+                    if best_match_idx >= 0:
+                        # Found our locked target - keep tracking it
+                        chosen_idx = best_match_idx
+                        sticky_miss_frames = 0
                     else:
-                        headshot_offset = box_height * 0.2
+                        # Locked target not found this frame
+                        sticky_miss_frames += 1
+                        if sticky_miss_frames >= stickyAimFrames:
+                            # Target truly gone - switch to closest
+                            chosen_idx = 0
+                            sticky_target = None
+                            sticky_miss_frames = 0
+                        else:
+                            # Grace period: skip aiming this frame to avoid snapping
+                            goto_visuals = True
 
-                mouseMove = [xMid - cWidth, (yMid - headshot_offset) - cHeight]
+                if not goto_visuals:
+                    xMid = targets.iloc[chosen_idx].current_mid_x
+                    yMid = targets.iloc[chosen_idx].current_mid_y
+                    box_width = targets.iloc[chosen_idx].width
+                    box_height = targets.iloc[chosen_idx].height
 
-                # Apply smoothing
-                smoothedX = mouseMove[0] * aaMovementAmp / aaSmoothFactor
-                smoothedY = mouseMove[1] * aaMovementAmp / aaSmoothFactor
+                    # Update sticky aim target
+                    if stickyAimEnabled:
+                        sticky_target = (xMid, yMid, box_width, box_height)
+                        sticky_miss_frames = 0
 
-                # Moving the mouse only when the aim key is held down
-                if win32api.GetAsyncKeyState(aaActivateKey) < 0:
-                    win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(
-                        smoothedX), int(smoothedY), 0, 0)
-                last_mid_coord = [xMid, yMid]
+                    # Calculate aim point based on target part selection
+                    if aaTargetPart == "head":
+                        headshot_offset = box_height * 0.38
+                    elif aaTargetPart == "body":
+                        headshot_offset = box_height * 0.1
+                    elif aaTargetPart == "nearest":
+                        headshot_offset = 0
+                    else:
+                        if headshot_mode:
+                            headshot_offset = box_height * 0.38
+                        else:
+                            headshot_offset = box_height * 0.2
+
+                    mouseMove = [xMid - cWidth, (yMid - headshot_offset) - cHeight]
+
+                    # Apply smoothing
+                    smoothedX = mouseMove[0] * aaMovementAmp / aaSmoothFactor
+                    smoothedY = mouseMove[1] * aaMovementAmp / aaSmoothFactor
+
+                    # Moving the mouse only when the aim key is held down
+                    if win32api.GetAsyncKeyState(aaActivateKey) & 0x8000:
+                        moveX = round(smoothedX)
+                        moveY = round(smoothedY)
+
+                        # Dead zone: skip movement if offset is too small (prevents jitter)
+                        moveMagnitude = math.sqrt(moveX * moveX + moveY * moveY)
+                        if moveMagnitude >= aaDeadZone:
+                            move_mouse(moveX, moveY)
+
+                    last_mid_coord = [xMid, yMid]
             else:
+                # No targets in FOV
+                if stickyAimEnabled:
+                    sticky_miss_frames += 1
+                    if sticky_miss_frames >= stickyAimFrames:
+                        sticky_target = None
+                        sticky_miss_frames = 0
                 last_mid_coord = None
 
         else:
+            # No detections at all
+            if stickyAimEnabled:
+                sticky_miss_frames += 1
+                if sticky_miss_frames >= stickyAimFrames:
+                    sticky_target = None
+                    sticky_miss_frames = 0
             last_mid_coord = None
 
         # See what the bot sees

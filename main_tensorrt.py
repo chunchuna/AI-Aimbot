@@ -130,9 +130,9 @@ def main():
                     smoothedY = mouseMove[1] * aaMovementAmp / aaSmoothFactor
 
                     # Moving the mouse only when the aim key is held down
-                    if win32api.GetAsyncKeyState(aaActivateKey) < 0:
-                        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(
-                            smoothedX), int(smoothedY), 0, 0)
+                    if win32api.GetAsyncKeyState(aaActivateKey) & 0x8000:
+                        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, round(
+                            smoothedX), round(smoothedY), 0, 0)
                     last_mid_coord = [xMid, yMid]
                 else:
                     last_mid_coord = None

@@ -9,10 +9,10 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = .4
+aaMovementAmp = 1.35
 
 # Person Class Confidence
-confidence = 0.4
+confidence = 0.35
 
 # What key to press to quit and shutdown the autoaim
 aaQuitKey = "Q"
@@ -29,7 +29,7 @@ headshot_mode = True
 #   0x06 = X2 mouse button (side button)
 #   0x10 = Shift key
 #   0x11 = Ctrl key
-aaActivateKey = 0x02
+aaActivateKey = 0x2
 
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
@@ -39,17 +39,21 @@ aaTargetPart = "head"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 3.0
+aaSmoothFactor = 1.0
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 150
+aaFOV = 225
+
+# Crosshair Y offset (pixels) to align AI crosshair with game crosshair
+# Negative = aim higher, Positive = aim lower
+crosshairYOffset = 9
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True
 
 # Set to True if you want to get the visuals
-visuals = False
+visuals = True
 
 # Smarter selection of people
 centerOfScreen = True
@@ -59,3 +63,28 @@ centerOfScreen = True
 # 2 - AMD
 # 3 - NVIDIA
 onnxChoice = 1
+
+# ============ Mouse Movement Method ============
+# "win32" - Default win32api.mouse_event (may be detected by anti-cheat)
+# "ddxoft" - ddxoft virtual input driver (requires ddxoft.dll + run as admin)
+mouseMovementMethod = "win32"
+
+# ============ Dead Zone ============
+# Minimum pixel distance before mouse moves. Prevents jitter when on target.
+# Set to 0 to disable. Recommended: 3~8
+aaDeadZone = 5
+
+# ============ Sticky Aim (Anti Target Switching) ============
+# When enabled, locks onto the closest target and won't switch to others
+# until the current target disappears for several consecutive frames.
+stickyAimEnabled = True
+
+# How many consecutive frames the current target must be missing before switching
+# Higher = more sticky (won't switch easily), Lower = faster switching
+# Recommended: 5~15
+stickyAimFrames = 8
+
+# Maximum pixel distance to consider a detection as the "same" target between frames
+# Larger = more forgiving for fast-moving targets, Smaller = more precise tracking
+# Recommended: 50~150
+stickyAimTrackRadius = 100

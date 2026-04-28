@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title AI Vision Viewer
+title AI Aimbot - Vision Viewer + Config
 
 pushd "%~dp0"
 
-echo Starting AI Vision Viewer...
+echo Starting AI Aimbot (Vision Viewer + Config Panel)...
 echo.
 
 python --version >nul 2>&1
