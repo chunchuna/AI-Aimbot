@@ -47,7 +47,10 @@ aaFOV = 225
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = 9
+crosshairYOffset = 7
+
+# Screen capture FPS (30-500)
+captureFPS = 266
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True

@@ -46,20 +46,21 @@ CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
 
 
 def scan_onnx_models():
-    """Scan project root and customModels/ for .onnx files, return display_name -> abs_path dict."""
+    """Scan project root, customModels/, and models/ for .onnx files, return display_name -> abs_path dict."""
     models = {}
     # Scan project root
     for f in os.listdir(SCRIPT_DIR):
         if f.lower().endswith(".onnx"):
             models[f] = os.path.join(SCRIPT_DIR, f)
-    # Scan customModels subdirectories
-    cm_dir = os.path.join(SCRIPT_DIR, "customModels")
-    if os.path.isdir(cm_dir):
-        for dirpath, _dirnames, filenames in os.walk(cm_dir):
-            for f in filenames:
-                if f.lower().endswith(".onnx"):
-                    rel = os.path.relpath(os.path.join(dirpath, f), SCRIPT_DIR)
-                    models[rel] = os.path.join(dirpath, f)
+    # Scan additional directories: customModels/ and models/
+    for sub in ("customModels", "models"):
+        sub_dir = os.path.join(SCRIPT_DIR, sub)
+        if os.path.isdir(sub_dir):
+            for dirpath, _dirnames, filenames in os.walk(sub_dir):
+                for f in filenames:
+                    if f.lower().endswith(".onnx"):
+                        rel = os.path.relpath(os.path.join(dirpath, f), SCRIPT_DIR)
+                        models[rel] = os.path.join(dirpath, f)
     return models
 
 # Key display name -> virtual key code
@@ -80,7 +81,8 @@ KEY_CODE_TO_NAME = {v: k for k, v in KEY_OPTIONS.items()}
 
 TARGET_OPTIONS = {
     "头部 (Head)": "head",
-    "身体 (Body)": "body",
+    "胸口 (Chest)": "chest",
+    "身体中心 (Body)": "body",
     "最近位置 (Nearest)": "nearest",
 }
 TARGET_VALUE_TO_NAME = {v: k for k, v in TARGET_OPTIONS.items()}
@@ -166,7 +168,7 @@ class VisionViewerApp:
 
         self.visuals_var = tk.BooleanVar(value=True)
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
-        self.fps_var = tk.IntVar(value=60)
+        self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
 
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
@@ -331,7 +333,7 @@ class VisionViewerApp:
         self.fps_label.pack(side="right")
         tk.Scale(right, from_=30, to=500, orient="horizontal", variable=self.fps_var,
                  command=lambda v: self.fps_label.configure(text=str(int(float(v))))).pack(fill="x")
-        ttk.Label(right, text="需重启生效  推荐60~240", font=("", 8)).pack(anchor="w")
+        ttk.Label(right, text="实时生效  推荐60~240", font=("", 8)).pack(anchor="w")
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
@@ -364,6 +366,7 @@ class VisionViewerApp:
             "aaMovementAmp": round(self.amp_var.get(), 2),
             "confidence": round(self.conf_var.get(), 2),
             "crosshairYOffset": self.crosshair_y_offset_var.get(),
+            "captureFPS": self.fps_var.get(),
         }
         try:
             save_config_values(vals)
@@ -489,10 +492,9 @@ class VisionViewerApp:
         try:
             if self.model is None:
                 self.load_model()
-            self.camera = bettercam.create(region=region, output_color="BGRA", max_buffer_len=64)
+            self.camera = bettercam.create(region=region, output_color="BGRA")
             if self.camera is None:
                 raise RuntimeError("摄像头创建失败")
-            self.camera.start(target_fps=self.fps_var.get(), video_mode=True)
         except Exception as exc:
             self.status_var.set("启动失败")
             messagebox.showerror("启动失败", str(exc))
@@ -512,17 +514,27 @@ class VisionViewerApp:
         debug_timer = time.time()
 
         aim_log_timer = 0.0
+        current_fps = self.fps_var.get()
+        perf_capture_ms = 0.0
+        perf_infer_ms = 0.0
+        perf_total_ms = 0.0
+        perf_count = 0
+        render_counter = 0
+        RENDER_EVERY_N = 3  # Only render preview every N frames for performance
 
         print("===== Aim loop started =====")
         print(f"  win32api loaded = {win32api is not None}")
         print(f"  screenShot = {screenShotWidth}x{screenShotHeight}")
+        print(f"  target_fps = {current_fps}")
         print("=============================")
 
         while self.running:
-            frame = self.camera.get_latest_frame() if self.camera else None
+            t_frame_start = time.perf_counter()
+            frame = self.camera.grab() if self.camera else None
             if frame is None:
-                time.sleep(0.005)
+                time.sleep(0.001)
                 continue
+            t_capture_done = time.perf_counter()
 
             image = np.array(frame)
             if image.shape[2] == 4:
@@ -537,12 +549,14 @@ class VisionViewerApp:
             cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
             aim_on = self.aim_enabled_var.get()
             show_preview = self.visuals_var.get()
+            render_counter += 1
+            do_render = show_preview and (render_counter % RENDER_EVERY_N == 0)
 
-            # Preprocess
-            im = np.array([image]) / 255.0
-            im = im.astype(np.float16)
-            im = np.moveaxis(im, 3, 1)
+            # Preprocess — single operation chain to minimize allocations
+            im = np.expand_dims(image, 0).astype(np.float16) / 255.0
+            im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
 
+            t_infer_start = time.perf_counter()
             try:
                 with self._model_lock:
                     outputs = self.model.run(None, {'images': im})
@@ -551,10 +565,17 @@ class VisionViewerApp:
             except Exception as exc:
                 self.root.after(0, self.status_var.set, f"检测错误: {exc}")
                 break
+            t_infer_done = time.perf_counter()
+
+            # Accumulate perf stats
+            perf_capture_ms += (t_capture_done - t_frame_start) * 1000
+            perf_infer_ms += (t_infer_done - t_infer_start) * 1000
+            perf_total_ms += (t_infer_done - t_frame_start) * 1000
+            perf_count += 1
 
             # --- Build targets ---
             targets = []
-            display = image.copy() if show_preview else None
+            display = image.copy() if do_render else None
             for det in pred:
                 if len(det) == 0:
                     continue
@@ -587,25 +608,41 @@ class VisionViewerApp:
                 # Debug log every second
                 now_t = time.time()
                 if now_t - debug_timer > 1:
-                    print(f"[DEBUG] targets={len(targets)} key_down={keyDown} key={hex(cur_key)} fov={cur_fov} smooth={cur_smooth} amp={cur_amp} y_off={cur_y_offset}")
+                    if perf_count > 0:
+                        avg_cap = perf_capture_ms / perf_count
+                        avg_inf = perf_infer_ms / perf_count
+                        avg_tot = perf_total_ms / perf_count
+                        print(f"[PERF] actual_fps={perf_count} capture={avg_cap:.1f}ms infer={avg_inf:.1f}ms total={avg_tot:.1f}ms")
+                        perf_capture_ms = perf_infer_ms = perf_total_ms = 0.0
+                        perf_count = 0
+                    print(f"[DEBUG] targets={len(targets)} key_down={keyDown} fov={cur_fov} smooth={cur_smooth} amp={cur_amp} y_off={cur_y_offset}")
                     debug_timer = now_t
 
                 if len(targets) > 0:
                     t = targets[0]
                     xMid, yMid, box_h = t["mid_x"], t["mid_y"], t["box_h"]
 
+                    # Calculate aim Y from bounding box top (auto-scales with distance)
+                    # Percentage from top of bounding box:
+                    #   head  = 12% from top (head area)
+                    #   chest = 35% from top (upper chest)
+                    #   body  = 50% from top (center mass)
+                    #   nearest = 50% (center)
+                    y1_box = t["xyxy"][1]
                     if cur_target == "head":
-                        offset = box_h * 0.38
+                        aim_y_abs = y1_box + box_h * 0.12
+                    elif cur_target == "chest":
+                        aim_y_abs = y1_box + box_h * 0.35
                     elif cur_target == "body":
-                        offset = box_h * 0.1
+                        aim_y_abs = y1_box + box_h * 0.50
                     elif cur_target == "nearest":
-                        offset = 0
+                        aim_y_abs = yMid
                     else:
-                        offset = box_h * 0.38
+                        aim_y_abs = y1_box + box_h * 0.12
 
                     # Raw pixel offset from screen center to aim point
                     rawX = xMid - cWidth
-                    rawY = (yMid - offset) - (cHeight + cur_y_offset)
+                    rawY = aim_y_abs - (cHeight + cur_y_offset)
 
                     # Apply amp and smoothing directly each frame
                     # No accumulator needed: mouse_event rotates the game camera,
@@ -622,8 +659,7 @@ class VisionViewerApp:
                             aim_log_timer = now_t
 
                     if display is not None:
-                        aim_y = int(yMid - offset)
-                        cv2.circle(display, (int(xMid), aim_y), 5, (0, 0, 255), -1)
+                        cv2.circle(display, (int(xMid), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
             # Crosshair on display (with Y offset visualized)
             if display is not None:
@@ -640,7 +676,7 @@ class VisionViewerApp:
                 last_time = now
                 self.root.after(0, self.status_var.set, f"运行中 | FPS: {fps:.1f} | 目标: {len(targets)}")
 
-            if show_preview and display is not None:
+            if do_render and display is not None:
                 cv2.putText(display, f"{self.device_name} | FPS:{fps:.0f}", (8, 18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 aim_status = "ON" if aim_on else "OFF"
@@ -650,7 +686,7 @@ class VisionViewerApp:
                 if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
                     break
             else:
-                # Even without preview, need a small sleep to not hog CPU
+                # Yield CPU so key polling thread can run reliably
                 time.sleep(0.001)
 
         self.root.after(0, self.stop_viewer)
@@ -661,7 +697,7 @@ class VisionViewerApp:
         self.running = False
         try:
             if self.camera is not None:
-                self.camera.stop()
+                self.camera.release()
         except Exception:
             pass
         self.camera = None
