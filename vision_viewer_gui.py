@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import re
@@ -55,6 +56,57 @@ from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_bullet_delta, g
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
+PROFILES_DIR = os.path.join(SCRIPT_DIR, "profiles")
+LAST_PROFILE_PATH = os.path.join(PROFILES_DIR, "_last_profile.txt")
+
+# ---- Profile system ----
+def _ensure_profiles_dir():
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+
+def list_profiles():
+    """Return sorted list of profile names (without .json extension)."""
+    _ensure_profiles_dir()
+    names = []
+    for f in os.listdir(PROFILES_DIR):
+        if f.endswith(".json"):
+            names.append(f[:-5])
+    return sorted(names)
+
+def _profile_path(name):
+    return os.path.join(PROFILES_DIR, f"{name}.json")
+
+def save_profile(name, vals: dict):
+    """Save a config dict as a named profile JSON."""
+    _ensure_profiles_dir()
+    with open(_profile_path(name), "w", encoding="utf-8") as f:
+        json.dump(vals, f, ensure_ascii=False, indent=2)
+    # Remember last used profile
+    with open(LAST_PROFILE_PATH, "w", encoding="utf-8") as f:
+        f.write(name)
+
+def load_profile(name) -> dict:
+    """Load a named profile JSON. Returns dict or empty dict on error."""
+    path = _profile_path(name)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def delete_profile(name):
+    path = _profile_path(name)
+    if os.path.isfile(path):
+        os.remove(path)
+
+def get_last_profile():
+    """Return the name of the last used profile, or empty string."""
+    try:
+        with open(LAST_PROFILE_PATH, "r", encoding="utf-8") as f:
+            name = f.read().strip()
+        if os.path.isfile(_profile_path(name)):
+            return name
+    except Exception:
+        pass
+    return ""
 
 
 def _box_iou(box1, box2):
@@ -208,7 +260,7 @@ def save_config_values(values: dict):
             replacement = f'{name} = "{value}"'
         else:
             replacement = f'{name} = {value}'
-        content = re.sub(rf'^{name}\s*=\s*.+$', replacement, content, flags=re.MULTILINE)
+        content = re.sub(rf'^{name}\s*=\s*.+$', lambda m: replacement, content, flags=re.MULTILINE)
 
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         f.write(content)
@@ -286,6 +338,12 @@ class VisionViewerApp:
         cur_trig_hk = _read_config_hex("triggerToggleKey", 0x76)  # F7
         self.trigger_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(cur_trig_hk, "F7"))
 
+        # Profile system
+        self.profile_var = tk.StringVar()
+        last_prof = get_last_profile()
+        if last_prof:
+            self.profile_var.set(last_prof)
+
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
         self._key_poll_running = True
@@ -295,9 +353,9 @@ class VisionViewerApp:
         # Model selection
         self.available_models = scan_onnx_models()
         self.model_var = tk.StringVar()
-        default_model = "yolov5s320Half.onnx"
-        if default_model in self.available_models:
-            self.model_var.set(default_model)
+        saved_model = _read_config_value("selectedModel", "yolov5s320Half.onnx", str)
+        if saved_model in self.available_models:
+            self.model_var.set(saved_model)
         elif self.available_models:
             self.model_var.set(list(self.available_models.keys())[0])
         # Lock for thread-safe model swap
@@ -365,6 +423,24 @@ class VisionViewerApp:
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
         # Re-point 'right' to the scrollable inner frame
         right = scroll_frame
+
+        # ===== Profile selector =====
+        ttk.Label(right, text="── 配置方案 ──", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(0, 2))
+        prof_frame = ttk.Frame(right)
+        prof_frame.pack(fill="x", pady=2)
+        ttk.Label(prof_frame, text="当前方案:").pack(side="left")
+        self.profile_combo = ttk.Combobox(prof_frame, textvariable=self.profile_var,
+                                           values=list_profiles(), state="readonly", width=16)
+        self.profile_combo.pack(side="left", padx=4)
+        ttk.Button(prof_frame, text="加载", command=self._load_profile, width=4).pack(side="left", padx=2)
+
+        prof_btn_frame = ttk.Frame(right)
+        prof_btn_frame.pack(fill="x", pady=2)
+        ttk.Button(prof_btn_frame, text="新建方案", command=self._new_profile).pack(side="left", padx=(0, 4))
+        ttk.Button(prof_btn_frame, text="删除方案", command=self._delete_profile).pack(side="left", padx=(0, 4))
+        ttk.Button(prof_btn_frame, text="重命名", command=self._rename_profile).pack(side="left")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         ttk.Label(right, text="自瞄设置", font=("Microsoft YaHei UI", 12, "bold")).pack(pady=(0, 8), fill="x")
 
@@ -567,7 +643,7 @@ class VisionViewerApp:
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # Save button
-        ttk.Button(right, text="保存配置到 config.py", command=self.save_config).pack(fill="x", pady=4)
+        ttk.Button(right, text="保存配置 (config.py + 当前方案)", command=self.save_config).pack(fill="x", pady=4)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -640,9 +716,10 @@ class VisionViewerApp:
                 self._recoil_key_is_down = False
             time.sleep(0.001)  # 1ms = ~1000 Hz polling
 
-    # -------------------------------------------------------- config save
-    def save_config(self):
-        vals = {
+    # -------------------------------------------------------- config helpers
+    def _gather_config_vals(self):
+        """Collect current GUI values into a dict (used for save & profile)."""
+        return {
             "aaFOV": self.fov_var.get(),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -660,12 +737,180 @@ class VisionViewerApp:
             "recoilToggleKey": HOTKEY_OPTIONS.get(self.recoil_toggle_key_var.get(), 0x75),
             "triggerDelay": self.trigger_delay_var.get(),
             "triggerToggleKey": HOTKEY_OPTIONS.get(self.trigger_toggle_key_var.get(), 0x76),
+            "selectedModel": self.model_var.get(),
+            # Toggle states (profile-only, not written to config.py)
+            "aimEnabled": self.aim_enabled_var.get(),
+            "recoilEnabled": self.recoil_enabled_var.get(),
+            "triggerEnabled": self.trigger_enabled_var.get(),
+            "voiceEnabled": self.voice_enabled_var.get(),
         }
+
+    def _apply_config_vals(self, vals: dict):
+        """Apply a config dict to all GUI variables."""
+        if "aaFOV" in vals:
+            self.fov_var.set(int(vals["aaFOV"]))
+        if "aaTargetPart" in vals:
+            v = vals["aaTargetPart"]
+            self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
+        if "aaSmoothFactor" in vals:
+            self.smooth_var.set(float(vals["aaSmoothFactor"]))
+        if "aaActivateKey" in vals:
+            self.key_var.set(KEY_CODE_TO_NAME.get(int(vals["aaActivateKey"]), "鼠标右键 (Right Click)"))
+        if "aaMovementAmp" in vals:
+            self.amp_var.set(float(vals["aaMovementAmp"]))
+        if "confidence" in vals:
+            self.conf_var.set(float(vals["confidence"]))
+        if "crosshairYOffset" in vals:
+            self.crosshair_y_offset_var.set(int(vals["crosshairYOffset"]))
+        if "captureFPS" in vals:
+            self.fps_var.set(int(vals["captureFPS"]))
+        if "recoilWeapon" in vals:
+            self.recoil_weapon_var.set(vals["recoilWeapon"])
+        if "recoilStrength" in vals:
+            self.recoil_strength_var.set(float(vals["recoilStrength"]))
+        if "recoilSmooth" in vals:
+            self.recoil_smooth_var.set(int(vals["recoilSmooth"]))
+        if "recoilKey" in vals:
+            self.recoil_key_var.set(KEY_CODE_TO_NAME.get(int(vals["recoilKey"]), "鼠标左键 (Left Click)"))
+        if "aaTeamFilter" in vals:
+            v = vals["aaTeamFilter"]
+            self.team_var.set(TEAM_VALUE_TO_NAME.get(v, "全部目标 (All)"))
+        if "aimToggleKey" in vals:
+            self.aim_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(int(vals["aimToggleKey"]), "F5"))
+        if "recoilToggleKey" in vals:
+            self.recoil_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(int(vals["recoilToggleKey"]), "F6"))
+        if "triggerDelay" in vals:
+            self.trigger_delay_var.set(int(vals["triggerDelay"]))
+        if "triggerToggleKey" in vals:
+            self.trigger_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(int(vals["triggerToggleKey"]), "F7"))
+        if "selectedModel" in vals:
+            m = vals["selectedModel"]
+            if m in self.available_models:
+                self.model_var.set(m)
+        # Toggle states
+        if "aimEnabled" in vals:
+            self.aim_enabled_var.set(bool(vals["aimEnabled"]))
+        if "recoilEnabled" in vals:
+            self.recoil_enabled_var.set(bool(vals["recoilEnabled"]))
+        if "triggerEnabled" in vals:
+            self.trigger_enabled_var.set(bool(vals["triggerEnabled"]))
+        if "voiceEnabled" in vals:
+            self.voice_enabled_var.set(bool(vals["voiceEnabled"]))
+        self._update_status_labels()
+
+    # -------------------------------------------------------- config save
+    # Profile-only keys (not written to config.py)
+    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled"}
+
+    def save_config(self):
+        vals = self._gather_config_vals()
         try:
-            save_config_values(vals)
-            messagebox.showinfo("成功", "配置已保存到 config.py\n(当前运行中的设置已实时生效，无需重启)")
+            config_vals = {k: v for k, v in vals.items() if k not in self._PROFILE_ONLY_KEYS}
+            save_config_values(config_vals)
+            # Also save to current profile if one is selected
+            prof_name = self.profile_var.get()
+            if prof_name:
+                save_profile(prof_name, vals)
+                msg = f"配置已保存到 config.py + 方案「{prof_name}」\n(当前运行中的设置已实时生效，无需重启)"
+            else:
+                msg = "配置已保存到 config.py\n(当前运行中的设置已实时生效，无需重启)\n\n提示: 未选择方案，仅保存到 config.py"
+            messagebox.showinfo("成功", msg)
         except Exception as e:
             messagebox.showerror("错误", f"保存失败: {e}")
+
+    # -------------------------------------------------- profile management
+    def _refresh_profile_list(self):
+        """Refresh the profile combobox values."""
+        self.profile_combo["values"] = list_profiles()
+
+    def _load_profile(self):
+        name = self.profile_var.get()
+        if not name:
+            messagebox.showwarning("未选择", "请先选择一个配置方案。")
+            return
+        vals = load_profile(name)
+        if not vals:
+            messagebox.showerror("错误", f"方案「{name}」加载失败或为空。")
+            return
+        self._apply_config_vals(vals)
+        # Also write to config.py so it takes effect (exclude profile-only keys)
+        try:
+            config_vals = {k: v for k, v in vals.items() if k not in self._PROFILE_ONLY_KEYS}
+            save_config_values(config_vals)
+        except Exception:
+            pass
+        # Remember as last used
+        try:
+            with open(LAST_PROFILE_PATH, "w", encoding="utf-8") as f:
+                f.write(name)
+        except Exception:
+            pass
+        messagebox.showinfo("成功", f"已加载方案「{name}」\n所有设置已实时生效。")
+
+    def _new_profile(self):
+        from tkinter import simpledialog
+        name = simpledialog.askstring("新建配置方案", "请输入方案名称 (如 CS2, CF, Valorant):",
+                                       parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        # Check for invalid characters
+        if any(c in name for c in r'\/:*?"<>|'):
+            messagebox.showerror("错误", "方案名称不能包含特殊字符: \\ / : * ? \" < > |")
+            return
+        if name in list_profiles():
+            if not messagebox.askyesno("覆盖确认", f"方案「{name}」已存在，是否覆盖？"):
+                return
+        vals = self._gather_config_vals()
+        try:
+            save_profile(name, vals)
+            self._refresh_profile_list()
+            self.profile_var.set(name)
+            messagebox.showinfo("成功", f"方案「{name}」已创建并保存当前设置。")
+        except Exception as e:
+            messagebox.showerror("错误", f"创建失败: {e}")
+
+    def _delete_profile(self):
+        name = self.profile_var.get()
+        if not name:
+            messagebox.showwarning("未选择", "请先选择一个配置方案。")
+            return
+        if not messagebox.askyesno("确认删除", f"确定要删除方案「{name}」吗？\n此操作不可撤销。"):
+            return
+        try:
+            delete_profile(name)
+            self._refresh_profile_list()
+            self.profile_var.set("")
+            messagebox.showinfo("成功", f"方案「{name}」已删除。")
+        except Exception as e:
+            messagebox.showerror("错误", f"删除失败: {e}")
+
+    def _rename_profile(self):
+        old_name = self.profile_var.get()
+        if not old_name:
+            messagebox.showwarning("未选择", "请先选择一个配置方案。")
+            return
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring("重命名方案", f"将「{old_name}」重命名为:",
+                                           parent=self.root, initialvalue=old_name)
+        if not new_name or not new_name.strip() or new_name.strip() == old_name:
+            return
+        new_name = new_name.strip()
+        if any(c in new_name for c in r'\/:*?"<>|'):
+            messagebox.showerror("错误", "方案名称不能包含特殊字符: \\ / : * ? \" < > |")
+            return
+        if new_name in list_profiles():
+            messagebox.showerror("错误", f"方案「{new_name}」已存在。")
+            return
+        try:
+            vals = load_profile(old_name)
+            save_profile(new_name, vals)
+            delete_profile(old_name)
+            self._refresh_profile_list()
+            self.profile_var.set(new_name)
+            messagebox.showinfo("成功", f"方案已重命名: 「{old_name}」→「{new_name}」")
+        except Exception as e:
+            messagebox.showerror("错误", f"重命名失败: {e}")
 
     # ------------------------------------------------------- window list
     def refresh_windows(self):
@@ -1031,6 +1276,9 @@ class VisionViewerApp:
             # Key state comes from background 1000Hz polling thread
             keyDown = self._key_is_down
 
+            # Keep unfiltered targets for triggerbot (FOV is aim-only concept)
+            all_targets = list(targets)
+
             if win32api is not None and aim_on and len(targets) > 0:
                 targets.sort(key=lambda t: t["dist"])
                 if cur_fov > 0:
@@ -1186,27 +1434,22 @@ class VisionViewerApp:
 
             prev_lmb = cur_lmb
 
-            # --- Triggerbot ---
-            if win32api is not None and self.trigger_enabled_var.get() and len(targets) > 0:
+            # --- Triggerbot (uses all_targets, independent of aim FOV filter) ---
+            if win32api is not None and self.trigger_enabled_var.get() and len(all_targets) > 0:
                 trig_delay_ms = self.trigger_delay_var.get()
                 now_trig = time.perf_counter()
                 # Check if crosshair (screen center) is inside any enemy bounding box
                 crosshair_in_box = False
-                for t in targets:
+                for t in all_targets:
                     x1t, y1t, x2t, y2t = t["xyxy"]
                     if x1t <= cWidth <= x2t and y1t <= (cHeight + cur_y_offset) <= y2t:
                         crosshair_in_box = True
                         break
                 if crosshair_in_box:
-                    # Reset fired state after cooldown (allows re-fire on same/new target)
-                    if trigger_fired and (now_trig - trigger_fire_time) > 0.5:
-                        trigger_fired = False
-                        trigger_on_target_since = now_trig  # re-start delay timer
                     if trigger_on_target_since == 0.0:
                         trigger_on_target_since = now_trig
                     elapsed_on = (now_trig - trigger_on_target_since) * 1000.0
                     if elapsed_on >= trig_delay_ms and not trigger_fired:
-                        # Fire: mouse down then up
                         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
                         time.sleep(random.uniform(0.02, 0.06))
                         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
