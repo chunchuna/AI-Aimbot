@@ -306,6 +306,86 @@ RECOIL_DATA = {
 
 # fmt: on
 
+
+# ============================================================================
+# Rigid Recoil Data — ported from FullExternal-CS2-No-Recoil
+# ============================================================================
+# These are the RAW per-bullet delta arrays from the C++ project.
+# Values are at a reference sensitivity; the caller divides by CS2 sensitivity.
+# Format: {"weapon": {"size": N, "RawX": [...], "RawY": [...],
+#           "delays": {smoothness_name: {"steps": int, "delay": [us1, us2]}}}}
+# delay[0] = microseconds to sleep between each sub-step
+# delay[1] = microseconds to sleep after all sub-steps for this bullet
+# fmt: off
+
+RIGID_RECOIL_DATA = {
+    "AK-47": {
+        "size": 31,
+        "RawX": [0, 0, 0, 0, 0, 40, 40, -40, -90, -30, -20, -20, -20, 0, 80, 30, 50, 50, 30, 20, -20, -10, 0, 10, 0, -40, -90, -70, -30, -10, 0],
+        "RawY": [0, 40, 40, 80, 80, 80, 80, 20, -10, 20, 0, 0, -10, 20, 30, -10, 20, 0, -10, -10, 10, 10, 10, 0, 10, -10, 0, -50, 10, -10, 0],
+        "delays": {
+            "rigid":     {"steps": 1, "delay": [100000, 0]},
+            "semiRigid": {"steps": 2, "delay": [25000, 40000]},
+            "soft":      {"steps": 5, "delay": [4000, 20000]},
+        },
+    },
+    "M4A4": {
+        "size": 31,
+        "RawX": [0, 0, 0, 0, 0, -10, 10, 20, 20, 30, -40, -40, -40, -40, -40, -50, 0, 30, 30, 20, 60, 30, 40, 20, 10, 0, 0, 10, 10, 0, 0],
+        "RawY": [0, 10, 30, 40, 40, 60, 60, 60, 30, 20, 20, 20, 0, -10, 0, 10, 10, 0, 0, 0, 10, 0, 0, 10, 0, 10, 10, 0, 0, 0, 0],
+        "delays": {
+            "rigid":     {"steps": 1, "delay": [90000, 0]},
+            "semiRigid": {"steps": 2, "delay": [44500, 0]},
+            "soft":      {"steps": 5, "delay": [4000, 10000]},
+        },
+    },
+    "M4A1-S": {
+        "size": 26,
+        "RawX": [0, 0, 0, 0, 0, -10, 0, 30, 10, 30, -10, -40, -20, -30, -20, -20, -30, -30, 10, -10, 0, 20, 40, 60, 10, 0],
+        "RawY": [0, 10, 10, 30, 30, 40, 40, 50, 10, 10, 10, 20, 0, -10, 0, 0, -10, 0, 10, 0, 10, 0, 0, 20, 0, 0],
+        "delays": {
+            "rigid":     {"steps": 1, "delay": [90000, 0]},
+            "semiRigid": {"steps": 2, "delay": [44500, 0]},
+            "soft":      {"steps": 5, "delay": [4000, 10000]},
+        },
+    },
+}
+
+RIGID_WEAPON_NAMES = list(RIGID_RECOIL_DATA.keys()) + ["关闭 (Off)"]
+RIGID_SMOOTHNESS_NAMES = ["rigid", "semiRigid", "soft"]
+
+# fmt: on
+
+
+def get_rigid_weapon_data(weapon_name, cs2_sensitivity):
+    """
+    Get the sensitivity-adjusted X/Y arrays for rigid recoil.
+    Returns (X[], Y[], size) or (None, None, 0) if weapon not found.
+    """
+    data = RIGID_RECOIL_DATA.get(weapon_name)
+    if data is None:
+        return None, None, 0
+    sens = max(cs2_sensitivity, 0.01)
+    size = data["size"]
+    X = [round(data["RawX"][i] / sens) for i in range(size)]
+    Y = [round(data["RawY"][i] / sens) for i in range(size)]
+    return X, Y, size
+
+
+def get_rigid_delays(weapon_name, smoothness_name):
+    """
+    Get (steps, delay_us_array) for a weapon + smoothness combo.
+    Returns (steps, [delay0_us, delay1_us]) or (1, [100000, 0]) as default.
+    """
+    data = RIGID_RECOIL_DATA.get(weapon_name)
+    if data is None:
+        return 1, [100000, 0]
+    sm = data["delays"].get(smoothness_name)
+    if sm is None:
+        return 1, [100000, 0]
+    return sm["steps"], list(sm["delay"])
+
+
 # Weapon display names for GUI
 WEAPON_NAMES = list(RECOIL_DATA.keys())
 

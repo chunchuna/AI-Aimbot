@@ -83,6 +83,14 @@ aimToggleKey = 116
 recoilToggleKey = 120
 triggerToggleKey = 121
 
+# Rigid recoil mode (FullExternal-style dedicated thread)
+# Weapon for rigid recoil ("关闭 (Off)" = disabled)
+rigidWeapon = "关闭 (Off)"
+# Smoothness: "rigid" (most precise), "semiRigid" (moderate), "soft" (most natural)
+rigidSmoothness = "rigid"
+# CS2 in-game sensitivity (MUST match your game setting for accurate recoil control)
+cs2Sensitivity = 2.5
+
 # Triggerbot settings
 # Delay in ms before firing when crosshair is on target (0=instant, 50~150=natural)
 triggerDelay = 0

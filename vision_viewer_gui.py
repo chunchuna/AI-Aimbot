@@ -62,6 +62,17 @@ except ImportError:
 
 import ctypes.wintypes
 
+# ---- SendInput struct definitions for rigid recoil (module-level for performance) ----
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("mi", _MOUSEINPUT)]
+
+_MOUSEEVENTF_MOVE = 0x0001
+
 # ---- Transparent fullscreen overlay using Win32 API ----
 class OverlayWindow:
     """A transparent, click-through, always-on-top fullscreen window for drawing detection boxes."""
@@ -206,7 +217,9 @@ class OverlayWindow:
             self._hwnd = None
 
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
-from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size
+from recoil_patterns import (WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size,
+                              RIGID_WEAPON_NAMES, RIGID_SMOOTHNESS_NAMES,
+                              get_rigid_weapon_data, get_rigid_delays)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
@@ -495,6 +508,16 @@ class VisionViewerApp:
 
         # Recoil enabled toggle (like aim_enabled_var for aim)
         self.recoil_enabled_var = tk.BooleanVar(value=True)
+
+        # ---- Rigid recoil mode (FullExternal-style dedicated thread) ----
+        self.rigid_recoil_var = tk.BooleanVar(value=False)  # checkbox to enable rigid mode
+        self.rigid_weapon_var = tk.StringVar(value=_read_config_value("rigidWeapon", "关闭 (Off)", str))
+        self.rigid_smoothness_var = tk.StringVar(value=_read_config_value("rigidSmoothness", "rigid", str))
+        self.cs2_sensitivity_var = tk.DoubleVar(value=_read_config_value("cs2Sensitivity", 2.5, float))
+        # Rigid recoil thread control
+        self._rigid_recoil_running = False
+        self._rigid_recoil_thread = None
+        self._rigid_spray_active = False  # True while rigid thread is spraying (for aim Y suppression)
 
         # Toggle hotkeys
         self.aim_toggle_key_var = tk.StringVar()
@@ -792,6 +815,38 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
+        # --- Rigid Recoil Mode (FullExternal-style) ---
+        ttk.Label(right, text="── 精准压枪 (独立线程) ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
+        ttk.Label(right, text="完全复刻FullExternal压枪，独立线程+微秒级精度", font=("", 8)).pack(anchor="w")
+
+        ttk.Checkbutton(right, text="启用精准压枪模式 (勾选后替代上方旧压枪)",
+                         variable=self.rigid_recoil_var,
+                         command=self._on_rigid_toggle).pack(anchor="w", pady=2)
+
+        # Rigid weapon selector
+        f_rg1 = ttk.Frame(right); f_rg1.pack(fill="x", pady=2)
+        ttk.Label(f_rg1, text="武器:").pack(side="left")
+        ttk.Combobox(f_rg1, textvariable=self.rigid_weapon_var,
+                     values=RIGID_WEAPON_NAMES, state="readonly", width=16).pack(side="right", fill="x", expand=True)
+
+        # Rigid smoothness selector
+        f_rg2 = ttk.Frame(right); f_rg2.pack(fill="x", pady=2)
+        ttk.Label(f_rg2, text="平滑模式:").pack(side="left")
+        ttk.Combobox(f_rg2, textvariable=self.rigid_smoothness_var,
+                     values=RIGID_SMOOTHNESS_NAMES, state="readonly", width=16).pack(side="right")
+        ttk.Label(right, text="rigid=最精准(机器) semiRigid=适中 soft=最自然", font=("", 8)).pack(anchor="w")
+
+        # CS2 sensitivity
+        f_rg3 = ttk.Frame(right); f_rg3.pack(fill="x", pady=2)
+        ttk.Label(f_rg3, text="CS2灵敏度:").pack(side="left")
+        self.cs2_sens_label = ttk.Label(f_rg3, text=f"{self.cs2_sensitivity_var.get():.2f}")
+        self.cs2_sens_label.pack(side="right")
+        tk.Scale(right, from_=0.1, to=10.0, orient="horizontal", variable=self.cs2_sensitivity_var,
+                 resolution=0.01, command=lambda v: self.cs2_sens_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+        ttk.Label(right, text="必须和游戏内灵敏度一致! 默认2.50", font=("", 8)).pack(anchor="w")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
         # --- Triggerbot ---
         ttk.Label(right, text="── 扳机 (Triggerbot) ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
 
@@ -911,6 +966,111 @@ class VisionViewerApp:
                 self._recoil_key_is_down = False
             time.sleep(0.001)  # 1ms = ~1000 Hz polling
 
+    # ------------------------------------------------ rigid recoil thread
+    def _on_rigid_toggle(self):
+        """Called when the rigid recoil checkbox is toggled."""
+        if self.rigid_recoil_var.get():
+            self._start_rigid_recoil()
+        else:
+            self._stop_rigid_recoil()
+
+    def _start_rigid_recoil(self):
+        """Start the dedicated rigid recoil thread."""
+        if self._rigid_recoil_running:
+            return
+        self._rigid_recoil_running = True
+        self._rigid_recoil_thread = threading.Thread(target=self._rigid_recoil_loop, daemon=True)
+        self._rigid_recoil_thread.start()
+        print("[RIGID RECOIL] Thread started")
+
+    def _stop_rigid_recoil(self):
+        """Stop the dedicated rigid recoil thread."""
+        self._rigid_recoil_running = False
+        self._rigid_spray_active = False
+        if self._rigid_recoil_thread is not None:
+            self._rigid_recoil_thread.join(timeout=1.0)
+            self._rigid_recoil_thread = None
+        print("[RIGID RECOIL] Thread stopped")
+
+    @staticmethod
+    def _send_input_move(dx, dy):
+        """Use Windows SendInput API for lowest-latency mouse movement."""
+        inp = _INPUT()
+        inp.type = 0  # INPUT_MOUSE
+        inp.mi.dx = int(dx)
+        inp.mi.dy = int(dy)
+        inp.mi.dwFlags = _MOUSEEVENTF_MOVE
+        inp.mi.time = 0
+        inp.mi.mouseData = 0
+        inp.mi.dwExtraInfo = None
+        ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+    def _rigid_recoil_loop(self):
+        """
+        Dedicated rigid recoil thread — exact port of FullExternal-CS2-No-Recoil MainThread.
+        Runs independently from the AI inference loop at microsecond-level timing.
+        Uses SendInput for lowest latency mouse moves.
+        """
+        count = 0  # current bullet index (1-based in the loop, 0 = idle)
+
+        while self._rigid_recoil_running:
+            # Check if rigid recoil is enabled and weapon is selected
+            if not self.recoil_enabled_var.get():
+                self._rigid_spray_active = False
+                time.sleep(0.05)
+                continue
+
+            weapon = self.rigid_weapon_var.get()
+            if weapon == "关闭 (Off)" or weapon not in RIGID_WEAPON_NAMES:
+                self._rigid_spray_active = False
+                time.sleep(0.05)
+                continue
+
+            sens = self.cs2_sensitivity_var.get()
+            smoothness_name = self.rigid_smoothness_var.get()
+            X, Y, size = get_rigid_weapon_data(weapon, sens)
+            steps, delays = get_rigid_delays(weapon, smoothness_name)
+
+            if X is None or size == 0:
+                self._rigid_spray_active = False
+                time.sleep(0.05)
+                continue
+
+            # Read recoil trigger key
+            rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
+
+            # Check if trigger key is NOT held — reset spray
+            if not (win32api is not None and win32api.GetAsyncKeyState(rc_key) < 0):
+                if count != 0:
+                    count = 0
+                    self._rigid_spray_active = False
+                time.sleep(0.001)
+                continue
+
+            # Trigger key IS held
+            # Check if we've reached end of magazine
+            if count >= size - 1:
+                count = 0
+                self._rigid_spray_active = False
+                time.sleep(0.5)  # wait for magazine reload
+                continue
+
+            # Advance to next bullet and apply compensation
+            count += 1
+            self._rigid_spray_active = True
+
+            # SmoothMovementMove: split this bullet's compensation into sub-steps
+            for i in range(steps):
+                time.sleep(delays[0] / 1_000_000.0)  # microseconds → seconds
+                move_x = int(X[count] / steps)
+                move_y = int(Y[count] / steps)
+                self._send_input_move(move_x, move_y)
+
+            if delays[1] > 0:
+                time.sleep(delays[1] / 1_000_000.0)
+
+        self._rigid_spray_active = False
+
     # -------------------------------------------------------- config helpers
     def _gather_config_vals(self):
         """Collect current GUI values into a dict (used for save & profile)."""
@@ -935,11 +1095,16 @@ class VisionViewerApp:
             "triggerDelay": self.trigger_delay_var.get(),
             "triggerToggleKey": HOTKEY_OPTIONS.get(self.trigger_toggle_key_var.get(), 0x76),
             "selectedModel": self.model_var.get(),
+            # Rigid recoil
+            "rigidWeapon": self.rigid_weapon_var.get(),
+            "rigidSmoothness": self.rigid_smoothness_var.get(),
+            "cs2Sensitivity": round(self.cs2_sensitivity_var.get(), 2),
             # Toggle states (profile-only, not written to config.py)
             "aimEnabled": self.aim_enabled_var.get(),
             "recoilEnabled": self.recoil_enabled_var.get(),
             "triggerEnabled": self.trigger_enabled_var.get(),
             "voiceEnabled": self.voice_enabled_var.get(),
+            "rigidRecoilEnabled": self.rigid_recoil_var.get(),
         }
 
     def _apply_config_vals(self, vals: dict):
@@ -989,6 +1154,13 @@ class VisionViewerApp:
             m = vals["selectedModel"]
             if m in self.available_models:
                 self.model_var.set(m)
+        # Rigid recoil
+        if "rigidWeapon" in vals:
+            self.rigid_weapon_var.set(vals["rigidWeapon"])
+        if "rigidSmoothness" in vals:
+            self.rigid_smoothness_var.set(vals["rigidSmoothness"])
+        if "cs2Sensitivity" in vals:
+            self.cs2_sensitivity_var.set(float(vals["cs2Sensitivity"]))
         # Toggle states
         if "aimEnabled" in vals:
             self.aim_enabled_var.set(bool(vals["aimEnabled"]))
@@ -998,11 +1170,18 @@ class VisionViewerApp:
             self.trigger_enabled_var.set(bool(vals["triggerEnabled"]))
         if "voiceEnabled" in vals:
             self.voice_enabled_var.set(bool(vals["voiceEnabled"]))
+        if "rigidRecoilEnabled" in vals:
+            new_rigid = bool(vals["rigidRecoilEnabled"])
+            self.rigid_recoil_var.set(new_rigid)
+            if new_rigid:
+                self._start_rigid_recoil()
+            else:
+                self._stop_rigid_recoil()
         self._update_status_labels()
 
     # -------------------------------------------------------- config save
     # Profile-only keys (not written to config.py)
-    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled"}
+    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled"}
 
     def save_config(self):
         vals = self._gather_config_vals()
@@ -1857,6 +2036,10 @@ class VisionViewerApp:
 
                     if cur_aim_mode == "assist":
                         # --- Aim Assist mode ---
+                        # During rigid spray, suppress Y for assist too
+                        rigid_spraying_a = self._rigid_spray_active and self.rigid_recoil_var.get()
+                        if rigid_spraying_a:
+                            rawY = 0.0
                         # Additive pull toward target. User keeps full mouse control.
                         # Pull strength = proportional to offset, scaled by proximity:
                         #   - Far from target (near FOV edge): weak pull
@@ -1894,7 +2077,8 @@ class VisionViewerApp:
                         # During active spray, suppress Y-axis aim correction.
                         # Vertical control is handled entirely by the recoil pattern;
                         # aim only tracks horizontally (X) for spray transfer.
-                        spraying = (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
+                        rigid_spraying = self._rigid_spray_active and self.rigid_recoil_var.get()
+                        spraying = rigid_spraying or (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
                         if spraying:
                             rawY = 0.0
 
@@ -1926,14 +2110,16 @@ class VisionViewerApp:
                         cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
             # --- Recoil compensation (unified with aim, lerp-smoothed) ---
+            # Skip old lerp recoil entirely when rigid mode is active
             cur_lmb = self._recoil_key_is_down
+            _rigid_active = self.rigid_recoil_var.get() and self._rigid_recoil_running
             rc_weapon = self.recoil_weapon_var.get()
             rc_strength = self.recoil_strength_var.get()
             rc_mag = get_mag_size(rc_weapon)
             rc_smooth = max(self.recoil_smooth_var.get(), 1)
             rc_enabled = self.recoil_enabled_var.get()
 
-            if rc_enabled and rc_mag > 0 and rc_strength > 0:
+            if rc_enabled and rc_mag > 0 and rc_strength > 0 and not _rigid_active:
                 if cur_lmb and not prev_lmb:
                     # LMB just pressed — start spray
                     spray_start_time = time.perf_counter()
@@ -2079,6 +2265,7 @@ class VisionViewerApp:
 
     def on_close(self):
         self._key_poll_running = False
+        self._stop_rigid_recoil()
         self.stop_viewer()
         if self._overlay is not None:
             self._overlay.destroy()
