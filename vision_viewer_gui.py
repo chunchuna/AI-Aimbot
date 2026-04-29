@@ -102,6 +102,18 @@ TARGET_OPTIONS = {
 }
 TARGET_VALUE_TO_NAME = {v: k for k, v in TARGET_OPTIONS.items()}
 
+# Team filter: which class IDs to aim at
+# For multi-class models (e.g. cs2_320 with CT=0, T=1):
+#   "all"  = aim at all classes
+#   "ct"   = I am CT, aim at T (class 1)
+#   "t"    = I am T, aim at CT (class 0)
+TEAM_OPTIONS = {
+    "全部目标 (All)": "all",
+    "我是CT (瞄T)": "ct",
+    "我是T (瞄CT)": "t",
+}
+TEAM_VALUE_TO_NAME = {v: k for k, v in TEAM_OPTIONS.items()}
+
 
 def _read_config_value(name, default, cast=str):
     try:
@@ -185,12 +197,20 @@ class VisionViewerApp:
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
 
+        # Team filter
+        cur_team = _read_config_value("aaTeamFilter", "all", str)
+        self.team_var = tk.StringVar(value=TEAM_VALUE_TO_NAME.get(cur_team, "全部目标 (All)"))
+
         # Recoil compensation
         self.recoil_weapon_var = tk.StringVar(value=_read_config_value("recoilWeapon", "关闭 (Off)", str))
         self.recoil_strength_var = tk.DoubleVar(value=_read_config_value("recoilStrength", 1.0, float))
         self.recoil_smooth_var = tk.IntVar(value=_read_config_value("recoilSmooth", 4, int))
-        # Left-click state for tracking spray (polled by key poll thread)
-        self._lmb_is_down = False
+        # Recoil trigger key
+        self.recoil_key_var = tk.StringVar()
+        cur_rc_key = _read_config_hex("recoilKey", 0x01)
+        self.recoil_key_var.set(KEY_CODE_TO_NAME.get(cur_rc_key, "鼠标左键 (Left Click)"))
+        # Recoil key state for tracking spray (polled by key poll thread)
+        self._recoil_key_is_down = False
 
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
@@ -307,6 +327,13 @@ class VisionViewerApp:
         ttk.Combobox(f2, textvariable=self.key_var, values=list(KEY_OPTIONS.keys()),
                      state="readonly", width=20).pack(side="right")
 
+        # Team filter (enemy identification)
+        f_team = ttk.Frame(right); f_team.pack(fill="x", pady=2)
+        ttk.Label(f_team, text="敌我识别:").pack(side="left")
+        ttk.Combobox(f_team, textvariable=self.team_var, values=list(TEAM_OPTIONS.keys()),
+                     state="readonly", width=20).pack(side="right")
+        ttk.Label(right, text="需要多类别模型(如cs2_320) 单类别模型无效", font=("", 8)).pack(anchor="w")
+
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # FOV
@@ -373,6 +400,13 @@ class VisionViewerApp:
                                 values=WEAPON_NAMES, state="readonly", width=16)
         rc_combo.pack(side="right", fill="x", expand=True)
 
+        # Recoil trigger key
+        f_rc_key = ttk.Frame(right); f_rc_key.pack(fill="x", pady=2)
+        ttk.Label(f_rc_key, text="压枪按键:").pack(side="left")
+        ttk.Combobox(f_rc_key, textvariable=self.recoil_key_var, values=list(KEY_OPTIONS.keys()),
+                     state="readonly", width=20).pack(side="right")
+        ttk.Label(right, text="按住该键才会压枪 (通常选左键)", font=("", 8)).pack(anchor="w")
+
         # Recoil strength
         f_rc2 = ttk.Frame(right); f_rc2.pack(fill="x", pady=2)
         ttk.Label(f_rc2, text="压枪强度:").pack(side="left")
@@ -408,14 +442,15 @@ class VisionViewerApp:
                     self._key_is_down = True
                 else:
                     self._key_is_down = False
-                # Also track left mouse button for recoil spray counting
-                if win32api is not None and win32api.GetAsyncKeyState(0x01) & 0x8000:
-                    self._lmb_is_down = True
+                # Also track recoil trigger key for spray counting
+                rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
+                if win32api is not None and win32api.GetAsyncKeyState(rc_key) & 0x8000:
+                    self._recoil_key_is_down = True
                 else:
-                    self._lmb_is_down = False
+                    self._recoil_key_is_down = False
             except Exception:
                 self._key_is_down = False
-                self._lmb_is_down = False
+                self._recoil_key_is_down = False
             time.sleep(0.001)  # 1ms = ~1000 Hz polling
 
     # -------------------------------------------------------- config save
@@ -432,6 +467,8 @@ class VisionViewerApp:
             "recoilWeapon": self.recoil_weapon_var.get(),
             "recoilStrength": round(self.recoil_strength_var.get(), 2),
             "recoilSmooth": self.recoil_smooth_var.get(),
+            "recoilKey": KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01),
+            "aaTeamFilter": TEAM_OPTIONS.get(self.team_var.get(), "all"),
         }
         try:
             save_config_values(vals)
@@ -748,12 +785,24 @@ class VisionViewerApp:
             # --- Build targets ---
             targets = []
             display = image.copy() if do_render else None
+            # Team filter: determine which class IDs are enemies
+            cur_team = TEAM_OPTIONS.get(self.team_var.get(), "all")
+            # ct=0, t=1 (cs2_320 convention); "all"=aim at everything
+            if cur_team == "ct":
+                enemy_cls = {1}      # I am CT → enemies are T (class 1)
+            elif cur_team == "t":
+                enemy_cls = {0}      # I am T → enemies are CT (class 0)
+            else:
+                enemy_cls = None     # None = accept all classes
+
             for det in pred:
                 if len(det) == 0:
                     continue
                 for *xyxy, conf_val, cls in det:
                     if float(conf_val) < cur_conf:
                         continue
+                    cls_id = int(cls)
+                    is_enemy = (enemy_cls is None or cls_id in enemy_cls)
                     # Scale coordinates from model space back to capture space
                     x1 = float(xyxy[0]) * scale_x
                     y1 = float(xyxy[1]) * scale_y
@@ -763,13 +812,23 @@ class VisionViewerApp:
                     mid_y = (y1 + y2) / 2
                     box_h = y2 - y1
                     dist = ((mid_x - cWidth)**2 + (mid_y - cHeight)**2) ** 0.5
-                    targets.append({"mid_x": mid_x, "mid_y": mid_y, "box_h": box_h,
-                                    "dist": dist, "conf": float(conf_val),
-                                    "xyxy": (int(x1), int(y1), int(x2), int(y2))})
+                    # Only add enemies as aim targets
+                    if is_enemy:
+                        targets.append({"mid_x": mid_x, "mid_y": mid_y, "box_h": box_h,
+                                        "dist": dist, "conf": float(conf_val),
+                                        "xyxy": (int(x1), int(y1), int(x2), int(y2))})
                     if display is not None:
-                        cv2.rectangle(display, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                        cv2.putText(display, f"{float(conf_val):.0%}", (int(x1), max(20, int(y1)-8)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        # Color: red=enemy, blue=friendly, green=all mode
+                        if enemy_cls is None:
+                            color = (0, 255, 0)       # all mode: green
+                        elif is_enemy:
+                            color = (0, 0, 255)        # enemy: red
+                        else:
+                            color = (255, 180, 0)      # friendly: blue/cyan
+                        label = f"{'CT' if cls_id == 0 else 'T'} {float(conf_val):.0%}"
+                        cv2.rectangle(display, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                        cv2.putText(display, label, (int(x1), max(20, int(y1)-8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             # --- Aim assist ---
             cur_y_offset = self.crosshair_y_offset_var.get()
@@ -862,7 +921,7 @@ class VisionViewerApp:
                         cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
             # --- Recoil compensation (unified with aim, lerp-smoothed) ---
-            cur_lmb = self._lmb_is_down
+            cur_lmb = self._recoil_key_is_down
             rc_weapon = self.recoil_weapon_var.get()
             rc_strength = self.recoil_strength_var.get()
             rc_mag = get_mag_size(rc_weapon)

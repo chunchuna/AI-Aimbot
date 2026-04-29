@@ -37,6 +37,10 @@ aaActivateKey = 0x1
 # "nearest" - aims at the nearest point of the bounding box to the crosshair
 aaTargetPart = "head"
 
+# Team filter for enemy identification (requires multi-class model like cs2_320)
+# "all" = aim at all targets, "ct" = I am CT (aim at T), "t" = I am T (aim at CT)
+aaTeamFilter = "all"
+
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
 aaSmoothFactor = 1.9
@@ -53,13 +57,18 @@ crosshairYOffset = -9
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "M4A4"
+recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
 recoilStrength = 2.0
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
 recoilSmooth = 7
+
+# Recoil trigger key (only apply recoil while this key is held)
+# Default: 0x01 = Left mouse button (shooting key)
+# Set to match your fire key to avoid recoil during grenades etc.
+recoilKey = 1
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True
