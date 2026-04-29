@@ -29,7 +29,7 @@ headshot_mode = True
 #   0x06 = X2 mouse button (side button)
 #   0x10 = Shift key
 #   0x11 = Ctrl key
-aaActivateKey = 0x2
+aaActivateKey = 0x1
 
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
@@ -43,7 +43,7 @@ aaSmoothFactor = 1.9
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 225
+aaFOV = 74
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
@@ -57,6 +57,9 @@ recoilWeapon = "M4A4"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
 recoilStrength = 2.0
+
+# Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
+recoilSmooth = 7
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True

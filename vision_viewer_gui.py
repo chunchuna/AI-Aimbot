@@ -1,8 +1,10 @@
 import os
+import random
 import re
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from tkinter import messagebox, ttk
 
 import cv2
@@ -186,6 +188,7 @@ class VisionViewerApp:
         # Recoil compensation
         self.recoil_weapon_var = tk.StringVar(value=_read_config_value("recoilWeapon", "关闭 (Off)", str))
         self.recoil_strength_var = tk.DoubleVar(value=_read_config_value("recoilStrength", 1.0, float))
+        self.recoil_smooth_var = tk.IntVar(value=_read_config_value("recoilSmooth", 4, int))
         # Left-click state for tracking spray (polled by key poll thread)
         self._lmb_is_down = False
 
@@ -379,6 +382,15 @@ class VisionViewerApp:
                  resolution=0.5, command=lambda v: self.recoil_str_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
         ttk.Label(right, text="1.0=标准 <1弱补偿 >1强补偿 (按灵敏度调)", font=("", 8)).pack(anchor="w")
 
+        # Recoil smoothness
+        f_rc3 = ttk.Frame(right); f_rc3.pack(fill="x", pady=2)
+        ttk.Label(f_rc3, text="压枪平滑:").pack(side="left")
+        self.recoil_smooth_label = ttk.Label(f_rc3, text=str(self.recoil_smooth_var.get()))
+        self.recoil_smooth_label.pack(side="right")
+        tk.Scale(right, from_=1, to=8, orient="horizontal", variable=self.recoil_smooth_var,
+                 resolution=1, command=lambda v: self.recoil_smooth_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="1=瞬移(机器感) 3~5=自然手感 8=非常柔和", font=("", 8)).pack(anchor="w")
+
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # Save button
@@ -419,6 +431,7 @@ class VisionViewerApp:
             "captureFPS": self.fps_var.get(),
             "recoilWeapon": self.recoil_weapon_var.get(),
             "recoilStrength": round(self.recoil_strength_var.get(), 2),
+            "recoilSmooth": self.recoil_smooth_var.get(),
         }
         try:
             save_config_values(vals)
@@ -608,7 +621,11 @@ class VisionViewerApp:
         spray_start_time = 0.0   # When left-click started (for bullet index calc)
         prev_lmb = False         # Previous frame's LMB state
         last_recoil_idx = -1     # Last bullet index we applied recoil for
-        recoil_accum_x = 0.0     # Cumulative recoil mouse offset applied
+        recoil_target_x = 0.0   # Where recoil SHOULD be (accumulates bullet deltas)
+        recoil_target_y = 0.0
+        recoil_current_x = 0.0  # Where recoil ACTUALLY is (lerps toward target)
+        recoil_current_y = 0.0
+        recoil_accum_x = 0.0    # Total mouse pixels applied (for aim offset calc)
         recoil_accum_y = 0.0
 
         # Osiris-style max angle delta per frame (pixels) to prevent snap/overshoot
@@ -844,17 +861,22 @@ class VisionViewerApp:
                     if display is not None:
                         cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
-            # --- Recoil compensation (unified with aim) ---
+            # --- Recoil compensation (unified with aim, lerp-smoothed) ---
             cur_lmb = self._lmb_is_down
             rc_weapon = self.recoil_weapon_var.get()
             rc_strength = self.recoil_strength_var.get()
             rc_mag = get_mag_size(rc_weapon)
+            rc_smooth = max(self.recoil_smooth_var.get(), 1)
 
             if rc_mag > 0 and rc_strength > 0:
                 if cur_lmb and not prev_lmb:
                     # LMB just pressed — start spray
                     spray_start_time = time.perf_counter()
                     last_recoil_idx = -1
+                    recoil_target_x = 0.0
+                    recoil_target_y = 0.0
+                    recoil_current_x = 0.0
+                    recoil_current_y = 0.0
                     recoil_accum_x = 0.0
                     recoil_accum_y = 0.0
 
@@ -871,23 +893,38 @@ class VisionViewerApp:
                         bullet_idx = bi + 1
                     bullet_idx = min(bullet_idx, rc_mag - 1)
 
-                    # Apply recoil deltas for new bullets since last frame
+                    # Add new bullet deltas to the recoil target
                     while last_recoil_idx < bullet_idx:
                         last_recoil_idx += 1
                         dx, dy = get_bullet_delta(rc_weapon, last_recoil_idx)
-                        rc_mx = round(dx * rc_strength)
-                        rc_my = round(dy * rc_strength)
+                        recoil_target_x += dx * rc_strength
+                        recoil_target_y += dy * rc_strength
 
-                        if win32api is not None and (rc_mx != 0 or rc_my != 0):
-                            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
+                    # Lerp current position toward target
+                    # alpha = 1.0 → instant (no smooth), smaller → smoother
+                    # rc_smooth=1 → alpha=1.0, rc_smooth=4 → alpha≈0.35,
+                    # rc_smooth=8 → alpha≈0.2
+                    alpha = (1.0 / rc_smooth) * random.uniform(0.85, 1.15)
+                    alpha = min(alpha, 1.0)
+                    recoil_current_x += (recoil_target_x - recoil_current_x) * alpha
+                    recoil_current_y += (recoil_target_y - recoil_current_y) * alpha
 
-                        recoil_accum_x += rc_mx
-                        recoil_accum_y += rc_my
+                    # Apply the delta from what we've already sent
+                    rc_mx = round(recoil_current_x - recoil_accum_x)
+                    rc_my = round(recoil_current_y - recoil_accum_y)
+                    if win32api is not None and (rc_mx != 0 or rc_my != 0):
+                        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
+                    recoil_accum_x += rc_mx
+                    recoil_accum_y += rc_my
 
                 if not cur_lmb and prev_lmb:
                     # LMB released — reset spray
                     spray_start_time = 0.0
                     last_recoil_idx = -1
+                    recoil_target_x = 0.0
+                    recoil_target_y = 0.0
+                    recoil_current_x = 0.0
+                    recoil_current_y = 0.0
                     recoil_accum_x = 0.0
                     recoil_accum_y = 0.0
 
