@@ -40,9 +40,22 @@ except ImportError:
     win32con = None
 
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
+from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_fire_interval_ms, get_mag_size
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
+
+
+def _box_iou(box1, box2):
+    """Compute IoU between two sets of boxes [x1,y1,x2,y2]. box1: [N,4], box2: [M,4] → [N,M]."""
+    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
+    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+    inter_x1 = torch.max(box1[:, None, 0], box2[:, 0])
+    inter_y1 = torch.max(box1[:, None, 1], box2[:, 1])
+    inter_x2 = torch.min(box1[:, None, 2], box2[:, 2])
+    inter_y2 = torch.min(box1[:, None, 3], box2[:, 3])
+    inter = (inter_x2 - inter_x1).clamp(0) * (inter_y2 - inter_y1).clamp(0)
+    return inter / (area1[:, None] + area2 - inter + 1e-6)
 
 
 def scan_onnx_models():
@@ -170,6 +183,12 @@ class VisionViewerApp:
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
 
+        # Recoil compensation
+        self.recoil_weapon_var = tk.StringVar(value=_read_config_value("recoilWeapon", "关闭 (Off)", str))
+        self.recoil_strength_var = tk.DoubleVar(value=_read_config_value("recoilStrength", 1.0, float))
+        # Left-click state for tracking spray (polled by key poll thread)
+        self._lmb_is_down = False
+
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
         self._key_poll_running = True
@@ -186,6 +205,10 @@ class VisionViewerApp:
             self.model_var.set(list(self.available_models.keys())[0])
         # Lock for thread-safe model swap
         self._model_lock = threading.Lock()
+        self._model_input_size = (320, 320)  # (w, h) — updated when model loads
+        self._model_input_dtype = np.float16  # updated when model loads
+        self._model_input_name = "images"     # updated when model loads
+        self._model_output_format = "v5"      # "v5" or "v8" — updated when model loads
 
         self._build_ui()
         self.refresh_windows()
@@ -337,6 +360,27 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
+        # --- Recoil Compensation ---
+        ttk.Label(right, text="── 压枪补偿 ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
+
+        # Weapon selector
+        f_rc1 = ttk.Frame(right); f_rc1.pack(fill="x", pady=2)
+        ttk.Label(f_rc1, text="武器:").pack(side="left")
+        rc_combo = ttk.Combobox(f_rc1, textvariable=self.recoil_weapon_var,
+                                values=WEAPON_NAMES, state="readonly", width=16)
+        rc_combo.pack(side="right", fill="x", expand=True)
+
+        # Recoil strength
+        f_rc2 = ttk.Frame(right); f_rc2.pack(fill="x", pady=2)
+        ttk.Label(f_rc2, text="压枪强度:").pack(side="left")
+        self.recoil_str_label = ttk.Label(f_rc2, text=f"{self.recoil_strength_var.get():.2f}")
+        self.recoil_str_label.pack(side="right")
+        tk.Scale(right, from_=0.0, to=3.0, orient="horizontal", variable=self.recoil_strength_var,
+                 resolution=0.05, command=lambda v: self.recoil_str_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+        ttk.Label(right, text="1.0=标准 <1弱补偿 >1强补偿 (按灵敏度调)", font=("", 8)).pack(anchor="w")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
         # Save button
         ttk.Button(right, text="保存配置到 config.py", command=self.save_config).pack(fill="x", pady=4)
 
@@ -352,8 +396,14 @@ class VisionViewerApp:
                     self._key_is_down = True
                 else:
                     self._key_is_down = False
+                # Also track left mouse button for recoil spray counting
+                if win32api is not None and win32api.GetAsyncKeyState(0x01) & 0x8000:
+                    self._lmb_is_down = True
+                else:
+                    self._lmb_is_down = False
             except Exception:
                 self._key_is_down = False
+                self._lmb_is_down = False
             time.sleep(0.001)  # 1ms = ~1000 Hz polling
 
     # -------------------------------------------------------- config save
@@ -367,6 +417,8 @@ class VisionViewerApp:
             "confidence": round(self.conf_var.get(), 2),
             "crosshairYOffset": self.crosshair_y_offset_var.get(),
             "captureFPS": self.fps_var.get(),
+            "recoilWeapon": self.recoil_weapon_var.get(),
+            "recoilStrength": round(self.recoil_strength_var.get(), 2),
         }
         try:
             save_config_values(vals)
@@ -434,10 +486,26 @@ class VisionViewerApp:
             self.model_status_label.configure(text="正在加载...", foreground="orange")
             self.root.update_idletasks()
             new_model = self._create_onnx_session(path)
+            # Read model expected input size
+            inp = new_model.get_inputs()[0]
+            shape = inp.shape  # e.g. [1, 3, 640, 640]
+            model_h = int(shape[2]) if len(shape) >= 4 else 320
+            model_w = int(shape[3]) if len(shape) >= 4 else 320
+            model_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
+            # Detect output format: v5=[1,N,85] vs v8=[1,5+nc,anchors]
+            out_shape = new_model.get_outputs()[0].shape
+            if len(out_shape) == 3 and out_shape[1] is not None and out_shape[2] is not None:
+                out_fmt = "v8" if int(out_shape[1]) < int(out_shape[2]) else "v5"
+            else:
+                out_fmt = "v5"
             with self._model_lock:
                 self.model = new_model
-            self.model_status_label.configure(text=f"已加载: {self.model_var.get()}", foreground="green")
-            print(f"[MODEL] Switched to: {path}")
+                self._model_input_size = (model_w, model_h)
+                self._model_input_dtype = model_dtype
+                self._model_input_name = inp.name
+                self._model_output_format = out_fmt
+            self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {out_fmt})", foreground="green")
+            print(f"[MODEL] Switched to: {path}  input={inp.name} {model_w}x{model_h} dtype={inp.type} format={out_fmt} out_shape={out_shape}")
         except Exception as e:
             self.model_status_label.configure(text=f"加载失败!", foreground="red")
             messagebox.showerror("模型加载失败", str(e))
@@ -468,9 +536,22 @@ class VisionViewerApp:
         self.status_var.set("正在加载模型...")
         self.root.update_idletasks()
         self.model = self._create_onnx_session(path)
-        self.model_status_label.configure(text=f"已加载: {self.model_var.get()}", foreground="green")
+        # Read model expected input size
+        inp = self.model.get_inputs()[0]
+        shape = inp.shape
+        model_h = int(shape[2]) if len(shape) >= 4 else 320
+        model_w = int(shape[3]) if len(shape) >= 4 else 320
+        self._model_input_size = (model_w, model_h)
+        self._model_input_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
+        self._model_input_name = inp.name
+        out_shape = self.model.get_outputs()[0].shape
+        if len(out_shape) == 3 and out_shape[1] is not None and out_shape[2] is not None:
+            self._model_output_format = "v8" if int(out_shape[1]) < int(out_shape[2]) else "v5"
+        else:
+            self._model_output_format = "v5"
+        self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {self._model_output_format})", foreground="green")
         self.status_var.set("模型已加载。")
-        print(f"[MODEL] Loaded: {path}")
+        print(f"[MODEL] Loaded: {path}  input={inp.name} {model_w}x{model_h} dtype={self._model_input_dtype} format={self._model_output_format}")
 
     # --------------------------------------------------------- start/stop
     def start_viewer(self):
@@ -522,6 +603,13 @@ class VisionViewerApp:
         render_counter = 0
         RENDER_EVERY_N = 3  # Only render preview every N frames for performance
 
+        # Recoil spray tracking
+        spray_start_time = 0.0   # When left-click started (for bullet index calc)
+        prev_lmb = False         # Previous frame's LMB state
+        last_recoil_idx = -1     # Last bullet index we applied recoil for
+        recoil_accum_x = 0.0     # Cumulative recoil mouse offset applied
+        recoil_accum_y = 0.0
+
         print("===== Aim loop started =====")
         print(f"  win32api loaded = {win32api is not None}")
         print(f"  screenShot = {screenShotWidth}x{screenShotHeight}")
@@ -552,17 +640,79 @@ class VisionViewerApp:
             render_counter += 1
             do_render = show_preview and (render_counter % RENDER_EVERY_N == 0)
 
-            # Preprocess — single operation chain to minimize allocations
-            im = np.expand_dims(image, 0).astype(np.float16) / 255.0
+            # Preprocess — resize to model input size if needed
+            with self._model_lock:
+                model_w, model_h = self._model_input_size
+            cap_h, cap_w = image.shape[:2]
+            if cap_w != model_w or cap_h != model_h:
+                im_resized = cv2.resize(image, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
+                scale_x = cap_w / model_w
+                scale_y = cap_h / model_h
+            else:
+                im_resized = image
+                scale_x = 1.0
+                scale_y = 1.0
+            with self._model_lock:
+                model_dtype = self._model_input_dtype
+            im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
             im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
 
             t_infer_start = time.perf_counter()
             try:
                 with self._model_lock:
-                    outputs = self.model.run(None, {'images': im})
-                pred = torch.from_numpy(outputs[0]).to('cpu')
-                pred = non_max_suppression(pred, cur_conf, cur_conf, 0, False, max_det=10)
+                    input_name = self._model_input_name
+                    out_fmt = self._model_output_format
+                    outputs = self.model.run(None, {input_name: im})
+                raw = outputs[0]
+
+                if out_fmt == "v8":
+                    # YOLOv8 output: [1, 4+nc, anchors] → transpose to [1, anchors, 4+nc]
+                    raw_t = np.transpose(raw, (0, 2, 1))  # [1, 8400, 5]
+                    # raw_t format per row: [cx, cy, w, h, conf_cls0, conf_cls1, ...]
+                    # For single-class: col4 is the class confidence
+                    boxes = raw_t[0]  # [8400, 5+]
+                    nc = boxes.shape[1] - 4  # number of classes
+                    # Get max class confidence and class id per box
+                    if nc > 1:
+                        class_confs = boxes[:, 4:]
+                        class_ids = np.argmax(class_confs, axis=1)
+                        confs = np.max(class_confs, axis=1)
+                    else:
+                        confs = boxes[:, 4]
+                        class_ids = np.zeros(len(confs), dtype=int)
+                    # Filter by confidence
+                    mask = confs > cur_conf
+                    boxes_f = boxes[mask]
+                    confs_f = confs[mask]
+                    class_ids_f = class_ids[mask]
+                    # Convert cx,cy,w,h to x1,y1,x2,y2
+                    pred = []
+                    if len(boxes_f) > 0:
+                        cx, cy, w, h = boxes_f[:, 0], boxes_f[:, 1], boxes_f[:, 2], boxes_f[:, 3]
+                        x1 = cx - w / 2
+                        y1 = cy - h / 2
+                        x2 = cx + w / 2
+                        y2 = cy + h / 2
+                        # Simple NMS using torchvision-style or manual
+                        dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f.astype(np.float32)], axis=1))
+                        # Sort by confidence descending, keep top 10
+                        order = torch.argsort(dets[:, 4], descending=True)
+                        dets = dets[order[:50]]
+                        # Simple greedy NMS
+                        keep = []
+                        while len(dets) > 0 and len(keep) < 10:
+                            keep.append(dets[0])
+                            if len(dets) == 1:
+                                break
+                            ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
+                            dets = dets[1:][ious < 0.45]
+                        pred = [torch.stack(keep)] if keep else []
+                else:
+                    # YOLOv5 output: [1, N, 85]
+                    pred = torch.from_numpy(raw).to('cpu')
+                    pred = non_max_suppression(pred, cur_conf, cur_conf, 0, False, max_det=10)
             except Exception as exc:
+                print(f"[ERROR] Inference failed: {exc}")
                 self.root.after(0, self.status_var.set, f"检测错误: {exc}")
                 break
             t_infer_done = time.perf_counter()
@@ -582,7 +732,11 @@ class VisionViewerApp:
                 for *xyxy, conf_val, cls in det:
                     if int(cls) != 0 or float(conf_val) < cur_conf:
                         continue
-                    x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
+                    # Scale coordinates from model space back to capture space
+                    x1 = float(xyxy[0]) * scale_x
+                    y1 = float(xyxy[1]) * scale_y
+                    x2 = float(xyxy[2]) * scale_x
+                    y2 = float(xyxy[3]) * scale_y
                     mid_x = (x1 + x2) / 2
                     mid_y = (y1 + y2) / 2
                     box_h = y2 - y1
@@ -673,6 +827,57 @@ class VisionViewerApp:
 
                     if display is not None:
                         cv2.circle(display, (int(xMid), int(aim_y_abs)), 5, (0, 0, 255), -1)
+
+            # --- Recoil compensation (independent of aim assist) ---
+            cur_lmb = self._lmb_is_down
+            rc_weapon = self.recoil_weapon_var.get()
+            rc_strength = self.recoil_strength_var.get()
+            rc_interval = get_fire_interval_ms(rc_weapon)
+
+            if rc_interval > 0 and rc_strength > 0:
+                if cur_lmb and not prev_lmb:
+                    # LMB just pressed — start spray
+                    spray_start_time = time.perf_counter()
+                    last_recoil_idx = -1
+                    recoil_accum_x = 0.0
+                    recoil_accum_y = 0.0
+
+                if cur_lmb and spray_start_time > 0:
+                    # Calculate which bullet we're on
+                    elapsed_ms = (time.perf_counter() - spray_start_time) * 1000.0
+                    bullet_idx = int(elapsed_ms / rc_interval)
+                    mag = get_mag_size(rc_weapon)
+                    if mag > 0:
+                        bullet_idx = min(bullet_idx, mag - 1)
+
+                    if bullet_idx > last_recoil_idx:
+                        # Apply recoil compensation for new bullets since last frame
+                        cum_dx, cum_dy = get_recoil_offset(rc_weapon, bullet_idx)
+                        # Delta from what we've already applied
+                        delta_x = cum_dx * rc_strength - recoil_accum_x
+                        delta_y = cum_dy * rc_strength - recoil_accum_y
+                        rc_mx, rc_my = round(delta_x), round(delta_y)
+
+                        if win32api is not None and (rc_mx != 0 or rc_my != 0):
+                            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
+
+                        recoil_accum_x += rc_mx
+                        recoil_accum_y += rc_my
+                        last_recoil_idx = bullet_idx
+
+                        # Log recoil (at most once per second)
+                        now_rc = time.time()
+                        if now_rc - debug_timer > 0.5:
+                            print(f"[RECOIL] weapon={rc_weapon} bullet={bullet_idx} delta=({rc_mx},{rc_my}) accum=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
+
+                if not cur_lmb and prev_lmb:
+                    # LMB released — reset spray
+                    spray_start_time = 0.0
+                    last_recoil_idx = -1
+                    recoil_accum_x = 0.0
+                    recoil_accum_y = 0.0
+
+            prev_lmb = cur_lmb
 
             # Crosshair on display (with Y offset visualized)
             if display is not None:

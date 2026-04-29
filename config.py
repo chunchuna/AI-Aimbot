@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 1.35
+aaMovementAmp = 2.0
 
 # Person Class Confidence
 confidence = 0.35
@@ -51,6 +51,12 @@ crosshairYOffset = -10
 
 # Screen capture FPS (30-500)
 captureFPS = 266
+
+# Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
+recoilWeapon = "AK-47"
+
+# Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
+recoilStrength = 1.0
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True
