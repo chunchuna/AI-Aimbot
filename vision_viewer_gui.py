@@ -42,6 +42,15 @@ except ImportError:
     win32api = None
     win32con = None
 
+import ctypes
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # Per-Monitor DPI Aware
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()     # fallback: System DPI Aware
+    except Exception:
+        pass
+
 import winsound
 
 try:
@@ -155,6 +164,11 @@ KEY_OPTIONS = {
 }
 KEY_CODE_TO_NAME = {v: k for k, v in KEY_OPTIONS.items()}
 
+# Secondary key options (includes "禁用" to disable)
+KEY2_OPTIONS = {"禁用 (Off)": 0x00}
+KEY2_OPTIONS.update(KEY_OPTIONS)
+KEY2_CODE_TO_NAME = {v: k for k, v in KEY2_OPTIONS.items()}
+
 TARGET_OPTIONS = {
     "头部 (Head)": "head",
     "胸口 (Chest)": "chest",
@@ -250,7 +264,7 @@ def save_config_values(values: dict):
         content = f.read()
 
     for name, value in values.items():
-        if name == "aaActivateKey":
+        if name in ("aaActivateKey", "aaSecondaryKey"):
             replacement = f'{name} = {hex(value)}'
         elif name in ("visuals", "cpsDisplay", "centerOfScreen", "headshot_mode", "useMask"):
             replacement = f'{name} = {value}'
@@ -298,6 +312,10 @@ class VisionViewerApp:
         cur_key = _read_config_hex("aaActivateKey", 0x02)
         self.key_var.set(KEY_CODE_TO_NAME.get(cur_key, "鼠标右键 (Right Click)"))
 
+        self.key2_var = tk.StringVar()
+        cur_key2 = _read_config_hex("aaSecondaryKey", 0x00)
+        self.key2_var.set(KEY2_CODE_TO_NAME.get(cur_key2, "禁用 (Off)"))
+
         self.visuals_var = tk.BooleanVar(value=True)
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
@@ -344,6 +362,8 @@ class VisionViewerApp:
         if last_prof:
             self.profile_var.set(last_prof)
 
+        self._mouse_mode = False  # True = capture follows mouse cursor, no window needed
+
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
         self._key_poll_running = True
@@ -383,6 +403,7 @@ class VisionViewerApp:
         ttk.Label(top_frame, text="选择目标窗口:").pack(side=tk.LEFT)
         ttk.Button(top_frame, text="刷新", command=self.refresh_windows).pack(side=tk.RIGHT, padx=4)
         ttk.Button(top_frame, text="启动", command=self.start_viewer).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(top_frame, text="鼠标模式", command=self.start_viewer_mouse_mode).pack(side=tk.RIGHT, padx=4)
         ttk.Button(top_frame, text="停止", command=self.stop_viewer).pack(side=tk.RIGHT)
 
         columns = ("index", "title", "process", "pid", "size")
@@ -498,6 +519,12 @@ class VisionViewerApp:
         f2 = ttk.Frame(right); f2.pack(fill="x", pady=2)
         ttk.Label(f2, text="自瞄按键:").pack(side="left")
         ttk.Combobox(f2, textvariable=self.key_var, values=list(KEY_OPTIONS.keys()),
+                     state="readonly", width=20).pack(side="right")
+
+        # Secondary activate key
+        f2b = ttk.Frame(right); f2b.pack(fill="x", pady=2)
+        ttk.Label(f2b, text="次要自瞄键:").pack(side="left")
+        ttk.Combobox(f2b, textvariable=self.key2_var, values=list(KEY2_OPTIONS.keys()),
                      state="readonly", width=20).pack(side="right")
 
         # Team filter (enemy identification)
@@ -676,9 +703,12 @@ class VisionViewerApp:
                 if win32api is None:
                     time.sleep(0.01)
                     continue
-                # Aim activation key
+                # Aim activation key (primary OR secondary)
                 cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
-                self._key_is_down = bool(win32api.GetAsyncKeyState(cur_key) & 0x8000)
+                key1_down = bool(win32api.GetAsyncKeyState(cur_key) & 0x8000)
+                cur_key2 = KEY2_OPTIONS.get(self.key2_var.get(), 0x00)
+                key2_down = bool(win32api.GetAsyncKeyState(cur_key2) & 0x8000) if cur_key2 != 0 else False
+                self._key_is_down = key1_down or key2_down
                 # Recoil trigger key
                 rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
                 self._recoil_key_is_down = bool(win32api.GetAsyncKeyState(rc_key) & 0x8000)
@@ -724,6 +754,7 @@ class VisionViewerApp:
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
             "aaActivateKey": KEY_OPTIONS.get(self.key_var.get(), 0x02),
+            "aaSecondaryKey": KEY2_OPTIONS.get(self.key2_var.get(), 0x00),
             "aaMovementAmp": round(self.amp_var.get(), 2),
             "confidence": round(self.conf_var.get(), 2),
             "crosshairYOffset": self.crosshair_y_offset_var.get(),
@@ -756,6 +787,8 @@ class VisionViewerApp:
             self.smooth_var.set(float(vals["aaSmoothFactor"]))
         if "aaActivateKey" in vals:
             self.key_var.set(KEY_CODE_TO_NAME.get(int(vals["aaActivateKey"]), "鼠标右键 (Right Click)"))
+        if "aaSecondaryKey" in vals:
+            self.key2_var.set(KEY2_CODE_TO_NAME.get(int(vals["aaSecondaryKey"]), "禁用 (Off)"))
         if "aaMovementAmp" in vals:
             self.amp_var.set(float(vals["aaMovementAmp"]))
         if "confidence" in vals:
@@ -1053,9 +1086,31 @@ class VisionViewerApp:
             window.activate()
         except Exception:
             pass
-        left = ((window.left + window.right) // 2) - (screenShotWidth // 2)
-        top = window.top + (window.height - screenShotHeight) // 2
+        # Try to get the actual client area (game rendering area, excluding title bar)
+        # This gives the true center where the crosshair is
+        try:
+            hwnd = window._hWnd
+            rect = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
+            pt = ctypes.wintypes.POINT(0, 0)
+            ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt))
+            client_left = pt.x
+            client_top = pt.y
+            client_w = rect.right - rect.left
+            client_h = rect.bottom - rect.top
+            center_x = client_left + client_w // 2
+            center_y = client_top + client_h // 2
+            print(f"[CAPTURE] Using client area: ({client_left},{client_top}) {client_w}x{client_h} center=({center_x},{center_y})")
+        except Exception as e:
+            # Fallback: use window bounds
+            center_x = (window.left + window.right) // 2
+            center_y = (window.top + window.bottom) // 2
+            print(f"[CAPTURE] Fallback to window bounds: center=({center_x},{center_y}) err={e}")
+        left = center_x - screenShotWidth // 2
+        top = center_y - screenShotHeight // 2
         region = (left, top, left + screenShotWidth, top + screenShotHeight)
+        print(f"[CAPTURE] region={region}")
+        self._mouse_mode = False
         try:
             if self.model is None:
                 self.load_model()
@@ -1067,7 +1122,32 @@ class VisionViewerApp:
             messagebox.showerror("启动失败", str(exc))
             return
         self.running = True
-        self.status_var.set("运行中 | 按 Q 关闭预览窗口")
+        self.status_var.set("运行中 (窗口模式) | 按 Q 关闭预览窗口")
+        self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
+        self.worker.start()
+
+    def start_viewer_mouse_mode(self):
+        """Start capture in mouse-follow mode — region follows cursor every frame."""
+        if self.running:
+            return
+        if bettercam is None:
+            messagebox.showerror("缺少依赖", "bettercam 未安装。\npip install bettercam")
+            return
+        self._mouse_mode = True
+        try:
+            if self.model is None:
+                self.load_model()
+            # Create camera without fixed region — we pass region per-frame in grab()
+            self.camera = bettercam.create(output_color="BGRA")
+            if self.camera is None:
+                raise RuntimeError("摄像头创建失败")
+        except Exception as exc:
+            self.status_var.set("启动失败")
+            messagebox.showerror("启动失败", str(exc))
+            return
+        self.running = True
+        self.status_var.set("运行中 (鼠标模式) | 按 Q 关闭预览窗口")
+        print("[CAPTURE] Mouse-follow mode: region tracks cursor every frame")
         self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
         self.worker.start()
 
@@ -1118,7 +1198,17 @@ class VisionViewerApp:
 
         while self.running:
             t_frame_start = time.perf_counter()
-            frame = self.camera.grab() if self.camera else None
+            if self._mouse_mode and win32api is not None:
+                # Mouse-follow mode: capture region centered on cursor
+                cx, cy = win32api.GetCursorPos()
+                sw = ctypes.windll.user32.GetSystemMetrics(0)  # screen width
+                sh = ctypes.windll.user32.GetSystemMetrics(1)  # screen height
+                ml = max(0, min(cx - screenShotWidth // 2, sw - screenShotWidth))
+                mt = max(0, min(cy - screenShotHeight // 2, sh - screenShotHeight))
+                mouse_region = (ml, mt, ml + screenShotWidth, mt + screenShotHeight)
+                frame = self.camera.grab(region=mouse_region) if self.camera else None
+            else:
+                frame = self.camera.grab() if self.camera else None
             if frame is None:
                 time.sleep(0.001)
                 continue

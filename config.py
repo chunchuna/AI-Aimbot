@@ -31,6 +31,10 @@ headshot_mode = True
 #   0x11 = Ctrl key
 aaActivateKey = 0x2
 
+# Secondary aim activation key (0=disabled)
+# Common: 0x05=X1 side button, 0x06=X2 side button
+aaSecondaryKey = 0x0
+
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
 # "body" - aims at the center mass of the bounding box
@@ -39,15 +43,15 @@ aaTargetPart = "head"
 
 # Team filter for enemy identification (requires multi-class model like cs2_320)
 # "all" = aim at all targets, "ct" = I am CT (aim at T), "t" = I am T (aim at CT)
-aaTeamFilter = "t"
+aaTeamFilter = "ct"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 4.2
+aaSmoothFactor = 3.6
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 238
+aaFOV = 75
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
@@ -57,13 +61,13 @@ crosshairYOffset = 11
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "M4A4"
+recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
 recoilStrength = 2.0
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
-recoilSmooth = 4
+recoilSmooth = 6
 
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
