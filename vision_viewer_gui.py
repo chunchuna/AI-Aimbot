@@ -735,7 +735,7 @@ class VisionViewerApp:
                 if len(det) == 0:
                     continue
                 for *xyxy, conf_val, cls in det:
-                    if int(cls) != 0 or float(conf_val) < cur_conf:
+                    if float(conf_val) < cur_conf:
                         continue
                     # Scale coordinates from model space back to capture space
                     x1 = float(xyxy[0]) * scale_x

@@ -39,7 +39,7 @@ aaTargetPart = "head"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 2.6
+aaSmoothFactor = 1.9
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
@@ -47,13 +47,13 @@ aaFOV = 225
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -1
+crosshairYOffset = -9
 
 # Screen capture FPS (30-500)
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "AK-47"
+recoilWeapon = "M4A4"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
 recoilStrength = 2.0
