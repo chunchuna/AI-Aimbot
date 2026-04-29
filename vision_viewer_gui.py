@@ -135,6 +135,8 @@ HOTKEY_OPTIONS = {
 HOTKEY_CODE_TO_NAME = {v: k for k, v in HOTKEY_OPTIONS.items()}
 
 
+
+
 def _play_notification(text, voice_enabled, on=True):
     """Play audio notification in a background thread.
     voice_enabled=True → TTS speaks `text`; False → beep tone only.
@@ -277,6 +279,13 @@ class VisionViewerApp:
         # Voice notification toggle
         self.voice_enabled_var = tk.BooleanVar(value=True)
 
+        # Triggerbot
+        self.trigger_enabled_var = tk.BooleanVar(value=False)
+        self.trigger_delay_var = tk.IntVar(value=_read_config_value("triggerDelay", 80, int))
+        self.trigger_toggle_key_var = tk.StringVar()
+        cur_trig_hk = _read_config_hex("triggerToggleKey", 0x76)  # F7
+        self.trigger_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(cur_trig_hk, "F7"))
+
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
         self._key_poll_running = True
@@ -383,11 +392,18 @@ class VisionViewerApp:
         ttk.Label(status_frame, text="压枪状态:").pack(side="left")
         self.recoil_status_label = tk.Label(status_frame, text="已开启", fg="green", font=("", 9, "bold"))
         self.recoil_status_label.pack(side="left", padx=4)
+        status_frame2 = ttk.Frame(right)
+        status_frame2.pack(fill="x", pady=2)
+        ttk.Label(status_frame2, text="扳机状态:").pack(side="left")
+        self.trigger_status_label = tk.Label(status_frame2, text="已关闭", fg="red", font=("", 9, "bold"))
+        self.trigger_status_label.pack(side="left", padx=4)
 
         # Checkbuttons
         ttk.Checkbutton(right, text="启用自瞄", variable=self.aim_enabled_var,
                          command=self._update_status_labels).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="启用压枪", variable=self.recoil_enabled_var,
+                         command=self._update_status_labels).pack(anchor="w", pady=2)
+        ttk.Checkbutton(right, text="启用扳机", variable=self.trigger_enabled_var,
                          command=self._update_status_labels).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="显示预览窗口", variable=self.visuals_var).pack(anchor="w", pady=2)
 
@@ -508,6 +524,20 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
+        # --- Triggerbot ---
+        ttk.Label(right, text="── 扳机 (Triggerbot) ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
+
+        # Trigger delay
+        f_trig = ttk.Frame(right); f_trig.pack(fill="x", pady=2)
+        ttk.Label(f_trig, text="开枪延迟 (ms):").pack(side="left")
+        self.trigger_delay_label = ttk.Label(f_trig, text=str(self.trigger_delay_var.get()))
+        self.trigger_delay_label.pack(side="right")
+        tk.Scale(right, from_=0, to=500, orient="horizontal", variable=self.trigger_delay_var,
+                 resolution=10, command=lambda v: self.trigger_delay_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="0=瞬间开枪  50~150=自然反应  推荐80ms", font=("", 8)).pack(anchor="w")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
         # --- Toggle Hotkeys & Audio ---
         ttk.Label(right, text="── 快捷开关 ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
 
@@ -521,6 +551,12 @@ class VisionViewerApp:
         f_hk2 = ttk.Frame(right); f_hk2.pack(fill="x", pady=2)
         ttk.Label(f_hk2, text="压枪开关键:").pack(side="left")
         ttk.Combobox(f_hk2, textvariable=self.recoil_toggle_key_var, values=list(HOTKEY_OPTIONS.keys()),
+                     state="readonly", width=12).pack(side="right")
+
+        # Trigger toggle hotkey
+        f_hk3 = ttk.Frame(right); f_hk3.pack(fill="x", pady=2)
+        ttk.Label(f_hk3, text="扳机开关键:").pack(side="left")
+        ttk.Combobox(f_hk3, textvariable=self.trigger_toggle_key_var, values=list(HOTKEY_OPTIONS.keys()),
                      state="readonly", width=12).pack(side="right")
 
         ttk.Label(right, text="按一次开/再按一次关 (实时生效)", font=("", 8)).pack(anchor="w")
@@ -546,6 +582,10 @@ class VisionViewerApp:
             self.recoil_status_label.config(text="已开启", fg="green")
         else:
             self.recoil_status_label.config(text="已关闭", fg="red")
+        if self.trigger_enabled_var.get():
+            self.trigger_status_label.config(text="已开启", fg="green")
+        else:
+            self.trigger_status_label.config(text="已关闭", fg="red")
         # Re-schedule every 200ms to catch hotkey toggles
         self.root.after(200, self._update_status_labels)
 
@@ -554,6 +594,7 @@ class VisionViewerApp:
         """Background thread: poll aim key + recoil key + toggle hotkeys at ~1000 Hz."""
         prev_aim_toggle = False
         prev_rc_toggle = False
+        prev_trig_toggle = False
         while self._key_poll_running:
             try:
                 if win32api is None:
@@ -566,7 +607,7 @@ class VisionViewerApp:
                 rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
                 self._recoil_key_is_down = bool(win32api.GetAsyncKeyState(rc_key) & 0x8000)
 
-                # --- Toggle hotkeys (edge-triggered: fire on key-down transition) ---
+                # --- Toggle hotkeys (edge-triggered, via GetAsyncKeyState) ---
                 aim_hk = HOTKEY_OPTIONS.get(self.aim_toggle_key_var.get(), 0x74)
                 aim_hk_down = bool(win32api.GetAsyncKeyState(aim_hk) & 0x8000)
                 if aim_hk_down and not prev_aim_toggle:
@@ -584,6 +625,15 @@ class VisionViewerApp:
                     voice = self.voice_enabled_var.get()
                     _play_notification("开启压枪" if new_val else "关闭压枪", voice, on=new_val)
                 prev_rc_toggle = rc_hk_down
+
+                trig_hk = HOTKEY_OPTIONS.get(self.trigger_toggle_key_var.get(), 0x76)
+                trig_hk_down = bool(win32api.GetAsyncKeyState(trig_hk) & 0x8000)
+                if trig_hk_down and not prev_trig_toggle:
+                    new_val = not self.trigger_enabled_var.get()
+                    self.root.after(0, self.trigger_enabled_var.set, new_val)
+                    voice = self.voice_enabled_var.get()
+                    _play_notification("开启扳机" if new_val else "关闭扳机", voice, on=new_val)
+                prev_trig_toggle = trig_hk_down
 
             except Exception:
                 self._key_is_down = False
@@ -608,6 +658,8 @@ class VisionViewerApp:
             "aaTeamFilter": TEAM_OPTIONS.get(self.team_var.get(), "all"),
             "aimToggleKey": HOTKEY_OPTIONS.get(self.aim_toggle_key_var.get(), 0x74),
             "recoilToggleKey": HOTKEY_OPTIONS.get(self.recoil_toggle_key_var.get(), 0x75),
+            "triggerDelay": self.trigger_delay_var.get(),
+            "triggerToggleKey": HOTKEY_OPTIONS.get(self.trigger_toggle_key_var.get(), 0x76),
         }
         try:
             save_config_values(vals)
@@ -803,6 +855,11 @@ class VisionViewerApp:
         recoil_current_y = 0.0
         recoil_accum_x = 0.0    # Total mouse pixels applied (for aim offset calc)
         recoil_accum_y = 0.0
+
+        # Triggerbot state
+        trigger_on_target_since = 0.0  # timestamp when crosshair first entered a target box
+        trigger_fired = False          # whether we already fired for this "on-target" episode
+        trigger_fire_time = 0.0        # when the last shot was fired (for cooldown)
 
         # Osiris-style max angle delta per frame (pixels) to prevent snap/overshoot
         # This acts as a speed cap — no single frame can move more than this
@@ -1128,6 +1185,39 @@ class VisionViewerApp:
                     recoil_accum_y = 0.0
 
             prev_lmb = cur_lmb
+
+            # --- Triggerbot ---
+            if win32api is not None and self.trigger_enabled_var.get() and len(targets) > 0:
+                trig_delay_ms = self.trigger_delay_var.get()
+                now_trig = time.perf_counter()
+                # Check if crosshair (screen center) is inside any enemy bounding box
+                crosshair_in_box = False
+                for t in targets:
+                    x1t, y1t, x2t, y2t = t["xyxy"]
+                    if x1t <= cWidth <= x2t and y1t <= (cHeight + cur_y_offset) <= y2t:
+                        crosshair_in_box = True
+                        break
+                if crosshair_in_box:
+                    # Reset fired state after cooldown (allows re-fire on same/new target)
+                    if trigger_fired and (now_trig - trigger_fire_time) > 0.5:
+                        trigger_fired = False
+                        trigger_on_target_since = now_trig  # re-start delay timer
+                    if trigger_on_target_since == 0.0:
+                        trigger_on_target_since = now_trig
+                    elapsed_on = (now_trig - trigger_on_target_since) * 1000.0
+                    if elapsed_on >= trig_delay_ms and not trigger_fired:
+                        # Fire: mouse down then up
+                        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                        time.sleep(random.uniform(0.02, 0.06))
+                        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                        trigger_fired = True
+                        trigger_fire_time = now_trig
+                else:
+                    trigger_on_target_since = 0.0
+                    trigger_fired = False
+            else:
+                trigger_on_target_since = 0.0
+                trigger_fired = False
 
             # Crosshair on display (with Y offset visualized)
             if display is not None:

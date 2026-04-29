@@ -74,6 +74,11 @@ recoilKey = 2
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
 aimToggleKey = 116
 recoilToggleKey = 119
+triggerToggleKey = 118
+
+# Triggerbot settings
+# Delay in ms before firing when crosshair is on target (0=instant, 50~150=natural)
+triggerDelay = 0
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True
