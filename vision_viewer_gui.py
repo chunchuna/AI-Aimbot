@@ -299,7 +299,7 @@ class VisionViewerApp:
         self.smooth_label.pack(side="right")
         tk.Scale(right, from_=1.0, to=10.0, orient="horizontal", variable=self.smooth_var,
                  resolution=0.1, command=lambda v: self.smooth_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
-        ttk.Label(right, text="1.0=瞬锁  越大越平滑", font=("", 8)).pack(anchor="w")
+        ttk.Label(right, text="1.0=线性  越大=近距离刹车越强(防过冲)", font=("", 8)).pack(anchor="w")
 
         # Movement amp
         f5 = ttk.Frame(right); f5.pack(fill="x", pady=2)
@@ -643,19 +643,32 @@ class VisionViewerApp:
                     # Raw pixel offset from screen center to aim point
                     rawX = xMid - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
+                    raw_dist = (rawX**2 + rawY**2) ** 0.5
 
-                    # Apply amp and smoothing directly each frame
-                    # No accumulator needed: mouse_event rotates the game camera,
-                    # so the next captured frame already reflects the previous move.
-                    sX = rawX * cur_amp / cur_smooth
-                    sY = rawY * cur_amp / cur_smooth
+                    # --- Distance-based proportional damping ---
+                    # The closer to target, the slower we move (prevents overshoot).
+                    # damping_factor goes from ~0 (at target) to ~1 (far away).
+                    # Reference radius: half the capture area diagonal
+                    DAMP_REF = (cWidth**2 + cHeight**2) ** 0.5
+                    # Normalize distance to 0~1 range
+                    ratio = min(raw_dist / DAMP_REF, 1.0) if DAMP_REF > 0 else 1.0
+                    # Power curve: smooth controls steepness (1.0=linear, 2.0=quadratic brake)
+                    # Higher smooth = stronger braking near target
+                    damping = ratio ** cur_smooth
+                    # Final move = raw offset * amp * damping
+                    sX = rawX * cur_amp * damping
+                    sY = rawY * cur_amp * damping
                     mX, mY = round(sX), round(sY)
+
+                    # Dead zone: ignore tiny movements to prevent jitter on target
+                    if abs(mX) <= 1 and abs(mY) <= 1 and raw_dist < 3:
+                        mX, mY = 0, 0
 
                     if keyDown and (mX != 0 or mY != 0):
                         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
                         # Log at most once per second to avoid spam
                         if now_t - aim_log_timer > 1:
-                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) move=({mX},{mY}) amp={cur_amp} smooth={cur_smooth}")
+                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} damp={damping:.3f} move=({mX},{mY}) amp={cur_amp} smooth={cur_smooth}")
                             aim_log_timer = now_t
 
                     if display is not None:
