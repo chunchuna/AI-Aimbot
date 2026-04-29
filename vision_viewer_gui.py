@@ -60,6 +60,151 @@ except ImportError:
     win32com_client = None
     pythoncom = None
 
+import ctypes.wintypes
+
+# ---- Transparent fullscreen overlay using Win32 API ----
+class OverlayWindow:
+    """A transparent, click-through, always-on-top fullscreen window for drawing detection boxes."""
+
+    WS_EX_LAYERED = 0x80000
+    WS_EX_TRANSPARENT = 0x20
+    WS_EX_TOPMOST = 0x8
+    WS_EX_TOOLWINDOW = 0x80
+    WS_POPUP = 0x80000000
+    GWL_EXSTYLE = -20
+    LWA_COLORKEY = 0x1
+    HWND_TOPMOST = -1
+    SWP_NOMOVE = 0x2
+    SWP_NOSIZE = 0x1
+    SWP_NOACTIVATE = 0x10
+    SW_SHOWNOACTIVATE = 4
+
+    _CLASS_REGISTERED = False
+    _CLASS_NAME = "AimOverlayWnd"
+
+    def __init__(self):
+        self._hwnd = None
+        self._hdc = None
+        self._width = ctypes.windll.user32.GetSystemMetrics(0)
+        self._height = ctypes.windll.user32.GetSystemMetrics(1)
+        self._colorkey = 0x00010101  # BGR colorkey for transparency (near-black)
+        self._create_window()
+
+    def _create_window(self):
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        hInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
+
+        if not OverlayWindow._CLASS_REGISTERED:
+            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
+                                         ctypes.c_void_p, ctypes.c_void_p)
+            self._wndproc_ref = WNDPROC(lambda hwnd, msg, wp, lp:
+                                        user32.DefWindowProcW(hwnd, msg, wp, lp))
+
+            class WNDCLASSEXW(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint), ("style", ctypes.c_uint),
+                            ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                            ("cbWndExtra", ctypes.c_int), ("hInstance", ctypes.c_void_p),
+                            ("hIcon", ctypes.c_void_p), ("hCursor", ctypes.c_void_p),
+                            ("hbrBackground", ctypes.c_void_p), ("lpszMenuName", ctypes.c_wchar_p),
+                            ("lpszClassName", ctypes.c_wchar_p), ("hIconSm", ctypes.c_void_p)]
+
+            wc = WNDCLASSEXW()
+            wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+            wc.lpfnWndProc = self._wndproc_ref
+            wc.hInstance = hInstance
+            wc.lpszClassName = self._CLASS_NAME
+            wc.hbrBackground = gdi32.CreateSolidBrush(self._colorkey)
+            user32.RegisterClassExW(ctypes.byref(wc))
+            OverlayWindow._CLASS_REGISTERED = True
+        else:
+            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
+                                         ctypes.c_void_p, ctypes.c_void_p)
+            self._wndproc_ref = WNDPROC(lambda hwnd, msg, wp, lp:
+                                        user32.DefWindowProcW(hwnd, msg, wp, lp))
+
+        ex_style = (self.WS_EX_LAYERED | self.WS_EX_TRANSPARENT |
+                    self.WS_EX_TOPMOST | self.WS_EX_TOOLWINDOW)
+        self._hwnd = user32.CreateWindowExW(
+            ex_style, self._CLASS_NAME, "AimOverlay",
+            self.WS_POPUP, 0, 0, self._width, self._height,
+            None, None, hInstance, None)
+
+        # Set colorkey transparency
+        user32.SetLayeredWindowAttributes(self._hwnd, self._colorkey, 0, self.LWA_COLORKEY)
+        user32.ShowWindow(self._hwnd, self.SW_SHOWNOACTIVATE)
+
+    def draw(self, detections, capture_region=None):
+        """Draw detection boxes on the overlay.
+        detections: list of dicts with 'xyxy', 'conf', 'cls', optional '_role', '_color', '_label'
+        capture_region: (left, top, right, bottom) of the screen region that was captured"""
+        if not self._hwnd:
+            return
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        hdc = user32.GetDC(self._hwnd)
+        # Create double-buffer
+        mem_dc = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, self._width, self._height)
+        old_bmp = gdi32.SelectObject(mem_dc, bmp)
+
+        # Fill with colorkey (transparent)
+        brush = gdi32.CreateSolidBrush(self._colorkey)
+        rect = ctypes.wintypes.RECT(0, 0, self._width, self._height)
+        user32.FillRect(mem_dc, ctypes.byref(rect), brush)
+        gdi32.DeleteObject(brush)
+
+        # Capture region offset
+        ox, oy = 0, 0
+        if capture_region:
+            ox, oy = capture_region[0], capture_region[1]
+
+        for d in detections:
+            x1, y1, x2, y2 = d["xyxy"]
+            # Offset to screen coordinates
+            sx1, sy1, sx2, sy2 = x1 + ox, y1 + oy, x2 + ox, y2 + oy
+            color_bgr = d.get("_color", (0, 0, 255))  # default red
+            # GDI uses COLORREF = 0x00BBGGRR
+            cr = (color_bgr[2]) | (color_bgr[1] << 8) | (color_bgr[0] << 16)
+
+            pen = gdi32.CreatePen(0, 2, cr)  # PS_SOLID=0, width=2
+            old_pen = gdi32.SelectObject(mem_dc, pen)
+            null_brush = gdi32.GetStockObject(5)  # NULL_BRUSH
+            old_br = gdi32.SelectObject(mem_dc, null_brush)
+            gdi32.Rectangle(mem_dc, sx1, sy1, sx2, sy2)
+            gdi32.SelectObject(mem_dc, old_pen)
+            gdi32.SelectObject(mem_dc, old_br)
+            gdi32.DeleteObject(pen)
+
+            # Draw label text
+            label = d.get("_label", "")
+            if label:
+                gdi32.SetTextColor(mem_dc, cr)
+                gdi32.SetBkMode(mem_dc, 1)  # TRANSPARENT
+                txt = ctypes.create_unicode_buffer(label)
+                r = ctypes.wintypes.RECT(sx1, max(0, sy1 - 18), sx2 + 80, sy1)
+                user32.DrawTextW(mem_dc, txt, -1, ctypes.byref(r), 0)
+
+        # Blit to window
+        gdi32.BitBlt(hdc, 0, 0, self._width, self._height, mem_dc, 0, 0, 0x00CC0020)
+
+        # Cleanup
+        gdi32.SelectObject(mem_dc, old_bmp)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem_dc)
+        user32.ReleaseDC(self._hwnd, hdc)
+
+    def clear(self):
+        """Clear overlay (draw nothing)."""
+        self.draw([])
+
+    def destroy(self):
+        """Destroy the overlay window."""
+        if self._hwnd:
+            ctypes.windll.user32.DestroyWindow(self._hwnd)
+            self._hwnd = None
+
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
 from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size
 
@@ -328,6 +473,8 @@ class VisionViewerApp:
         self.key2_var.set(KEY2_CODE_TO_NAME.get(cur_key2, "禁用 (Off)"))
 
         self.visuals_var = tk.BooleanVar(value=True)
+        self.overlay_var = tk.BooleanVar(value=False)
+        self._overlay = None  # OverlayWindow instance, created on demand
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
 
@@ -514,6 +661,7 @@ class VisionViewerApp:
         ttk.Checkbutton(right, text="启用扳机", variable=self.trigger_enabled_var,
                          command=self._update_status_labels).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="显示预览窗口", variable=self.visuals_var).pack(anchor="w", pady=2)
+        ttk.Checkbutton(right, text="屏幕叠加层 (Overlay)", variable=self.overlay_var).pack(anchor="w", pady=2)
 
         # Start a periodic status label updater (catches hotkey toggles too)
         self._update_status_labels()
@@ -1191,6 +1339,7 @@ class VisionViewerApp:
         region = (left, top, left + screenShotWidth, top + screenShotHeight)
         print(f"[CAPTURE] region={region}")
         self._mouse_mode = False
+        self._capture_region = region  # for overlay coordinate mapping
         try:
             if self.model is None:
                 self.load_model()
@@ -1278,6 +1427,7 @@ class VisionViewerApp:
 
         while self.running:
             t_frame_start = time.perf_counter()
+            capture_region = None  # (left, top, ...) for overlay coordinate mapping
             if self._mouse_mode and win32api is not None:
                 # Mouse-follow mode: capture region centered on cursor
                 cx, cy = win32api.GetCursorPos()
@@ -1286,8 +1436,10 @@ class VisionViewerApp:
                 ml = max(0, min(cx - screenShotWidth // 2, sw - screenShotWidth))
                 mt = max(0, min(cy - screenShotHeight // 2, sh - screenShotHeight))
                 mouse_region = (ml, mt, ml + screenShotWidth, mt + screenShotHeight)
+                capture_region = mouse_region
                 frame = self.camera.grab(region=mouse_region) if self.camera else None
             else:
+                capture_region = getattr(self, '_capture_region', None)
                 frame = self.camera.grab() if self.camera else None
             if frame is None:
                 time.sleep(0.001)
@@ -1307,8 +1459,21 @@ class VisionViewerApp:
             cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
             aim_on = self.aim_enabled_var.get()
             show_preview = self.visuals_var.get()
+            use_overlay = self.overlay_var.get()
+            # Manage overlay lifecycle
+            if use_overlay and self._overlay is None:
+                try:
+                    self._overlay = OverlayWindow()
+                    print("[OVERLAY] Created fullscreen overlay")
+                except Exception as oe:
+                    print(f"[OVERLAY] Failed to create: {oe}")
+                    self._overlay = None
+            elif not use_overlay and self._overlay is not None:
+                self._overlay.destroy()
+                self._overlay = None
+                print("[OVERLAY] Destroyed overlay")
             render_counter += 1
-            do_render = show_preview and (render_counter % RENDER_EVERY_N == 0)
+            do_render = (show_preview or use_overlay) and (render_counter % RENDER_EVERY_N == 0)
 
             # Preprocess — resize to model input size if needed
             with self._model_lock:
@@ -1527,34 +1692,37 @@ class VisionViewerApp:
                     cls_id = d["cls"]
                     if cls_id in head_cls_ids:
                         d["_role"] = "head"
+                        color = (0, 255, 255)
+                        label = f"HEAD(c{cls_id}) {d['conf']:.0%}"
+                        d["_color"] = color; d["_label"] = label
                         head_boxes.append(d)
                         if display is not None:
-                            color = (0, 255, 255)
-                            label = f"HEAD(c{cls_id}) {d['conf']:.0%}"
                             cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
                             cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
                     elif cls_id in body_cls_ids:
                         d["_role"] = "body"
-                        # Apply team filter for bodies
+                        is_enemy = (enemy_body_cls is None or cls_id in enemy_body_cls)
+                        color = (0, 0, 255) if is_enemy else (255, 180, 0)
+                        side = "CT" if cls_id in ct_body_cls else "T"
+                        label = f"{side}(c{cls_id}) {d['conf']:.0%}"
+                        d["_color"] = color; d["_label"] = label
                         if enemy_body_cls is None or cls_id in enemy_body_cls:
                             targets.append(d)
                         if display is not None:
-                            is_enemy = (enemy_body_cls is None or cls_id in enemy_body_cls)
-                            color = (0, 0, 255) if is_enemy else (255, 180, 0)
-                            side = "CT" if cls_id in ct_body_cls else "T"
-                            label = f"{side}(c{cls_id}) {d['conf']:.0%}"
                             cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
                             cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                     else:
-                        # Unknown class — treat as body, add to targets
                         d["_role"] = "body"
+                        color = (0, 255, 0)
+                        label = f"c{cls_id} {d['conf']:.0%}"
+                        d["_color"] = color; d["_label"] = label
                         targets.append(d)
                         if display is not None:
-                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], (0, 255, 0), 2)
-                            cv2.putText(display, f"c{cls_id} {d['conf']:.0%}", (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             elif is_headbody_model and len(all_dets) > 0:
                 # Geometric containment model (e.g. GO_头身): small box inside big box = head
@@ -1571,18 +1739,20 @@ class VisionViewerApp:
                             break
                 for d in all_dets:
                     if d["_role"] == "head":
+                        color = (0, 255, 255)
+                        label = f"HEAD(c{d['cls']}) {d['conf']:.0%}"
+                        d["_color"] = color; d["_label"] = label
                         head_boxes.append(d)
                         if display is not None:
-                            color = (0, 255, 255)
-                            label = f"HEAD(c{d['cls']}) {d['conf']:.0%}"
                             cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
                             cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
                     else:
+                        color = (0, 0, 255)
+                        label = f"BODY(c{d['cls']}) {d['conf']:.0%}"
+                        d["_color"] = color; d["_label"] = label
                         targets.append(d)
                         if display is not None:
-                            color = (0, 0, 255)
-                            label = f"BODY(c{d['cls']}) {d['conf']:.0%}"
                             cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
                             cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
@@ -1592,14 +1762,15 @@ class VisionViewerApp:
                     is_enemy = (enemy_cls is None or d["cls"] in enemy_cls)
                     if is_enemy:
                         targets.append(d)
+                    if enemy_cls is None:
+                        color = (0, 255, 0)
+                    elif is_enemy:
+                        color = (0, 0, 255)
+                    else:
+                        color = (255, 180, 0)
+                    label = f"{'CT' if d['cls'] == 0 else 'T'} {d['conf']:.0%}"
+                    d["_color"] = color; d["_label"] = label
                     if display is not None:
-                        if enemy_cls is None:
-                            color = (0, 255, 0)
-                        elif is_enemy:
-                            color = (0, 0, 255)
-                        else:
-                            color = (255, 180, 0)
-                        label = f"{'CT' if d['cls'] == 0 else 'T'} {d['conf']:.0%}"
                         cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
                         cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
@@ -1867,7 +2038,7 @@ class VisionViewerApp:
                 last_time = now
                 self.root.after(0, self.status_var.set, f"运行中 | FPS: {fps:.1f} | 目标: {len(targets)}")
 
-            if do_render and display is not None:
+            if do_render and display is not None and show_preview:
                 cv2.putText(display, f"{self.device_name} | FPS:{fps:.0f}", (8, 18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 aim_status = "ON" if aim_on else "OFF"
@@ -1879,9 +2050,15 @@ class VisionViewerApp:
                     cv_window_created = True
                 if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
                     break
-            else:
+            elif not show_preview:
                 # Yield CPU so key polling thread can run reliably
                 time.sleep(0.001)
+
+            # --- Overlay drawing ---
+            if do_render and use_overlay and self._overlay is not None:
+                self._overlay.draw(all_dets, capture_region)
+            elif not use_overlay and self._overlay is not None:
+                pass  # overlay destroyed above already
 
         self.root.after(0, self.stop_viewer)
 
@@ -1895,12 +2072,17 @@ class VisionViewerApp:
         except Exception:
             pass
         self.camera = None
+        if self._overlay is not None:
+            self._overlay.clear()
         cv2.destroyAllWindows()
         self.status_var.set("已停止")
 
     def on_close(self):
         self._key_poll_running = False
         self.stop_viewer()
+        if self._overlay is not None:
+            self._overlay.destroy()
+            self._overlay = None
         self.root.destroy()
 
 

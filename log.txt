@@ -1,0 +1,9 @@
+[2026-04-30 02:04:22.233] [PreviewService] [QML] debugWindowBtn start clicked captureMode=dxgi
+[2026-04-30 02:04:22.235] [PreviewService] startEmbedded requested appDir=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs currentPath=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs exePath=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs/Qt6QuickCore.bin captureSource=dxgi captureDevice=(empty)
+[2026-04-30 02:04:22.235] [PreviewService] launch embedded backend captureSource=dxgi env.CAPTURE_SOURCE= env.CAPTURE_DEVICE= env.STREAM_URL=
+[2026-04-30 02:04:46.384] [PreviewService] [QML] debugWindowBtn start clicked captureMode=dxgi
+[2026-04-30 02:04:46.386] [PreviewService] startEmbedded requested appDir=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs currentPath=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs exePath=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs/Qt6QuickCore.bin captureSource=dxgi captureDevice=(empty)
+[2026-04-30 02:04:46.387] [PreviewService] launch embedded backend captureSource=dxgi env.CAPTURE_SOURCE= env.CAPTURE_DEVICE= env.STREAM_URL=
+[2026-04-30 02:05:22.928] [PreviewService] [QML] debugWindowBtn start clicked captureMode=dxgi
+[2026-04-30 02:05:22.930] [PreviewService] start requested embedded=0 appDir=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs currentPath=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs exePath=C:/Users/Administrator/Desktop/chimera 4.14/chimera/libs/Qt6QuickCore.bin captureSource=dxgi captureDevice=(empty)
+[2026-04-30 02:05:22.931] [PreviewService] launch backend captureSource=dxgi env.CAPTURE_SOURCE= env.CAPTURE_DEVICE= env.STREAM_URL=

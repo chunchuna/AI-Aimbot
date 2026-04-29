@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 2.0
+aaMovementAmp = 0.6
 
 # Person Class Confidence
 confidence = 0.1
@@ -50,11 +50,11 @@ aaAimMode = "aimbot"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 4.7
+aaSmoothFactor = 1.0
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 187
+aaFOV = 137
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
@@ -67,7 +67,7 @@ captureFPS = 266
 recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 0.5
+recoilStrength = 1.0
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
 recoilSmooth = 8
@@ -75,7 +75,7 @@ recoilSmooth = 8
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
 # Set to match your fire key to avoid recoil during grenades etc.
-recoilKey = 2
+recoilKey = 1
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
