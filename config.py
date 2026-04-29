@@ -47,16 +47,16 @@ aaFOV = 225
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -10
+crosshairYOffset = -1
 
 # Screen capture FPS (30-500)
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "关闭 (Off)"
+recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 8.5
+recoilStrength = 2.0
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True

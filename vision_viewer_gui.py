@@ -611,9 +611,9 @@ class VisionViewerApp:
         recoil_accum_x = 0.0     # Cumulative recoil mouse offset applied
         recoil_accum_y = 0.0
 
-        # EMA output smoothing to reduce jitter
-        ema_mx = 0.0             # EMA-smoothed mouse move X
-        ema_my = 0.0             # EMA-smoothed mouse move Y
+        # Osiris-style max angle delta per frame (pixels) to prevent snap/overshoot
+        # This acts as a speed cap — no single frame can move more than this
+        MAX_PIXEL_DELTA = 150
 
         print("===== Aim loop started =====")
         print(f"  win32api loaded = {win32api is not None}")
@@ -782,18 +782,11 @@ class VisionViewerApp:
                     xMid, yMid, box_h = t["mid_x"], t["mid_y"], t["box_h"]
 
                     # Calculate aim point from bounding box (auto-scales with distance)
-                    # Y percentages from top of bounding box:
-                    #   head  = 8% from top (head center)
-                    #   chest = 35% from top (upper chest)
-                    #   body  = 50% from top (center mass)
-                    #   nearest = 50% (center)
                     x1_box, y1_box = t["xyxy"][0], t["xyxy"][1]
                     x2_box = t["xyxy"][2]
                     box_w = x2_box - x1_box
                     if cur_target == "head":
                         aim_y_abs = y1_box + box_h * 0.08
-                        # Head X: use center of upper 15% of box (more accurate
-                        # when model is side-facing, since head is at the top)
                         aim_x_abs = x1_box + box_w * 0.5
                     elif cur_target == "chest":
                         aim_y_abs = y1_box + box_h * 0.35
@@ -808,48 +801,43 @@ class VisionViewerApp:
                         aim_y_abs = y1_box + box_h * 0.08
                         aim_x_abs = x1_box + box_w * 0.5
 
+                    # --- Osiris-style unified aim offset ---
                     # Raw pixel offset from screen center to aim point
                     rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
+
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
-                    # --- Proportional move + EMA smoothing ---
-                    # Step 1: Proportional — move a fraction of remaining distance.
-                    #   smooth=1 → move 100% per frame (instant snap)
-                    #   smooth=3 → move 33% per frame (smooth tracking)
-                    #   smooth=5 → move 20% per frame (very smooth)
-                    # amp scales the base speed.
-                    frac = cur_amp / max(cur_smooth, 0.5)
-                    desiredX = rawX * frac
-                    desiredY = rawY * frac
+                    # --- Osiris-style smoothing: offset / smooth ---
+                    # No EMA, no momentum. Pure proportional each frame.
+                    # smooth=1 → instant, smooth=3 → 33% per frame, etc.
+                    smooth_div = max(cur_smooth, 1.0)
+                    moveX = rawX * cur_amp / smooth_div
+                    moveY = rawY * cur_amp / smooth_div
 
-                    # Step 2: EMA on output — filters detection jitter.
-                    # Higher EMA_ALPHA = more responsive, lower = smoother
-                    EMA_ALPHA = 0.5
-                    ema_mx = EMA_ALPHA * desiredX + (1 - EMA_ALPHA) * ema_mx
-                    ema_my = EMA_ALPHA * desiredY + (1 - EMA_ALPHA) * ema_my
+                    # Clamp per-frame movement to MAX_PIXEL_DELTA (anti-overshoot)
+                    move_mag = (moveX**2 + moveY**2) ** 0.5
+                    if move_mag > MAX_PIXEL_DELTA:
+                        scale = MAX_PIXEL_DELTA / move_mag
+                        moveX *= scale
+                        moveY *= scale
 
-                    mX, mY = round(ema_mx), round(ema_my)
+                    mX, mY = round(moveX), round(moveY)
 
-                    # Dead zone: ignore sub-pixel jitter when on target
+                    # Dead zone: suppress sub-pixel jitter when nearly on target
                     if abs(mX) <= 1 and abs(mY) <= 1 and raw_dist < 3:
                         mX, mY = 0, 0
-                        ema_mx, ema_my = 0.0, 0.0
 
                     if keyDown and (mX != 0 or mY != 0):
                         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
-                        # Log at most once per second to avoid spam
                         if now_t - aim_log_timer > 1:
-                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) amp={cur_amp} smooth={cur_smooth}")
+                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) recoil_off=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
                             aim_log_timer = now_t
-                    else:
-                        # Reset EMA when not aiming to avoid stale momentum
-                        ema_mx, ema_my = 0.0, 0.0
 
                     if display is not None:
                         cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
-            # --- Recoil compensation (independent of aim assist) ---
+            # --- Recoil compensation (unified with aim) ---
             cur_lmb = self._lmb_is_down
             rc_weapon = self.recoil_weapon_var.get()
             rc_strength = self.recoil_strength_var.get()
@@ -866,7 +854,6 @@ class VisionViewerApp:
                 if cur_lmb and spray_start_time > 0:
                     # Calculate which bullet we're on using per-bullet timing
                     elapsed_ms = (time.perf_counter() - spray_start_time) * 1000.0
-                    # Walk through pattern, summing each bullet's delay to find current bullet
                     cumulative_ms = 0.0
                     bullet_idx = 0
                     for bi in range(rc_mag):
@@ -877,7 +864,7 @@ class VisionViewerApp:
                         bullet_idx = bi + 1
                     bullet_idx = min(bullet_idx, rc_mag - 1)
 
-                    # Apply deltas for all new bullets since last frame
+                    # Apply recoil deltas for new bullets since last frame
                     while last_recoil_idx < bullet_idx:
                         last_recoil_idx += 1
                         dx, dy = get_bullet_delta(rc_weapon, last_recoil_idx)
@@ -886,14 +873,11 @@ class VisionViewerApp:
 
                         if win32api is not None and (rc_mx != 0 or rc_my != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
+                            if last_recoil_idx <= 5:
+                                print(f"[RECOIL-DBG] bullet={last_recoil_idx} raw=({dx},{dy}) sent=({rc_mx},{rc_my})")
 
                         recoil_accum_x += rc_mx
                         recoil_accum_y += rc_my
-
-                    # Log recoil (at most once per second)
-                    now_rc = time.time()
-                    if now_rc - debug_timer > 0.5:
-                        print(f"[RECOIL] weapon={rc_weapon} bullet={last_recoil_idx} accum=({recoil_accum_x:.0f},{recoil_accum_y:.0f}) strength={rc_strength}")
 
                 if not cur_lmb and prev_lmb:
                     # LMB released — reset spray
