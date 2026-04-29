@@ -68,7 +68,12 @@ recoilSmooth = 7
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
 # Set to match your fire key to avoid recoil during grenades etc.
-recoilKey = 1
+recoilKey = 2
+
+# Toggle hotkeys (press once to enable, press again to disable)
+# F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
+aimToggleKey = 116
+recoilToggleKey = 119
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True

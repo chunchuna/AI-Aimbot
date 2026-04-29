@@ -41,6 +41,15 @@ except ImportError:
     win32api = None
     win32con = None
 
+import winsound
+
+try:
+    import win32com.client as win32com_client
+    import pythoncom
+except ImportError:
+    win32com_client = None
+    pythoncom = None
+
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
 from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size
 
@@ -113,6 +122,48 @@ TEAM_OPTIONS = {
     "我是T (瞄CT)": "t",
 }
 TEAM_VALUE_TO_NAME = {v: k for k, v in TEAM_OPTIONS.items()}
+
+# Hotkey options for toggle keys (keyboard keys only)
+HOTKEY_OPTIONS = {
+    "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
+    "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
+    "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+    "Home": 0x24, "End": 0x23, "Insert": 0x2D, "Delete": 0x2E,
+    "Page Up": 0x21, "Page Down": 0x22,
+    "Num 0": 0x60, "Num 1": 0x61, "Num 2": 0x62, "Num 3": 0x63,
+}
+HOTKEY_CODE_TO_NAME = {v: k for k, v in HOTKEY_OPTIONS.items()}
+
+
+def _play_notification(text, voice_enabled, on=True):
+    """Play audio notification in a background thread.
+    voice_enabled=True → TTS speaks `text`; False → beep tone only.
+    on=True → high-pitched beep (enabled); False → low-pitched beep (disabled).
+    """
+    def _worker():
+        if voice_enabled and win32com_client is not None and pythoncom is not None:
+            try:
+                pythoncom.CoInitialize()
+                speaker = win32com_client.Dispatch("SAPI.SpVoice")
+                speaker.Rate = 4  # faster speech
+                speaker.Speak(text)
+                pythoncom.CoUninitialize()
+                return
+            except Exception:
+                pass
+        # Fallback: beep tones
+        try:
+            if on:
+                winsound.Beep(800, 150)
+                time.sleep(0.05)
+                winsound.Beep(1200, 150)
+            else:
+                winsound.Beep(1200, 150)
+                time.sleep(0.05)
+                winsound.Beep(600, 200)
+        except Exception:
+            pass
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _read_config_value(name, default, cast=str):
@@ -212,6 +263,20 @@ class VisionViewerApp:
         # Recoil key state for tracking spray (polled by key poll thread)
         self._recoil_key_is_down = False
 
+        # Recoil enabled toggle (like aim_enabled_var for aim)
+        self.recoil_enabled_var = tk.BooleanVar(value=True)
+
+        # Toggle hotkeys
+        self.aim_toggle_key_var = tk.StringVar()
+        cur_aim_hk = _read_config_hex("aimToggleKey", 0x74)  # F5
+        self.aim_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(cur_aim_hk, "F5"))
+        self.recoil_toggle_key_var = tk.StringVar()
+        cur_rc_hk = _read_config_hex("recoilToggleKey", 0x75)  # F6
+        self.recoil_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(cur_rc_hk, "F6"))
+
+        # Voice notification toggle
+        self.voice_enabled_var = tk.BooleanVar(value=True)
+
         # Thread-safe key state flag (polled at ~1000Hz by background thread)
         self._key_is_down = False
         self._key_poll_running = True
@@ -309,9 +374,25 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
-        # Aim enabled
-        ttk.Checkbutton(right, text="启用自瞄", variable=self.aim_enabled_var).pack(anchor="w", pady=2)
+        # --- Status display ---
+        status_frame = ttk.Frame(right)
+        status_frame.pack(fill="x", pady=2)
+        ttk.Label(status_frame, text="自瞄状态:").pack(side="left")
+        self.aim_status_label = tk.Label(status_frame, text="已开启", fg="green", font=("", 9, "bold"))
+        self.aim_status_label.pack(side="left", padx=(4, 12))
+        ttk.Label(status_frame, text="压枪状态:").pack(side="left")
+        self.recoil_status_label = tk.Label(status_frame, text="已开启", fg="green", font=("", 9, "bold"))
+        self.recoil_status_label.pack(side="left", padx=4)
+
+        # Checkbuttons
+        ttk.Checkbutton(right, text="启用自瞄", variable=self.aim_enabled_var,
+                         command=self._update_status_labels).pack(anchor="w", pady=2)
+        ttk.Checkbutton(right, text="启用压枪", variable=self.recoil_enabled_var,
+                         command=self._update_status_labels).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="显示预览窗口", variable=self.visuals_var).pack(anchor="w", pady=2)
+
+        # Start a periodic status label updater (catches hotkey toggles too)
+        self._update_status_labels()
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
@@ -427,27 +508,83 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
+        # --- Toggle Hotkeys & Audio ---
+        ttk.Label(right, text="── 快捷开关 ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
+
+        # Aim toggle hotkey
+        f_hk1 = ttk.Frame(right); f_hk1.pack(fill="x", pady=2)
+        ttk.Label(f_hk1, text="自瞄开关键:").pack(side="left")
+        ttk.Combobox(f_hk1, textvariable=self.aim_toggle_key_var, values=list(HOTKEY_OPTIONS.keys()),
+                     state="readonly", width=12).pack(side="right")
+
+        # Recoil toggle hotkey
+        f_hk2 = ttk.Frame(right); f_hk2.pack(fill="x", pady=2)
+        ttk.Label(f_hk2, text="压枪开关键:").pack(side="left")
+        ttk.Combobox(f_hk2, textvariable=self.recoil_toggle_key_var, values=list(HOTKEY_OPTIONS.keys()),
+                     state="readonly", width=12).pack(side="right")
+
+        ttk.Label(right, text="按一次开/再按一次关 (实时生效)", font=("", 8)).pack(anchor="w")
+
+        # Voice notification toggle
+        ttk.Checkbutton(right, text="语音播报 (关闭则只播放音效)", variable=self.voice_enabled_var).pack(anchor="w", pady=2)
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
         # Save button
         ttk.Button(right, text="保存配置到 config.py", command=self.save_config).pack(fill="x", pady=4)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # -------------------------------------------------- status label updater
+    def _update_status_labels(self):
+        """Update aim/recoil status labels. Called by checkbutton command and periodically."""
+        if self.aim_enabled_var.get():
+            self.aim_status_label.config(text="已开启", fg="green")
+        else:
+            self.aim_status_label.config(text="已关闭", fg="red")
+        if self.recoil_enabled_var.get():
+            self.recoil_status_label.config(text="已开启", fg="green")
+        else:
+            self.recoil_status_label.config(text="已关闭", fg="red")
+        # Re-schedule every 200ms to catch hotkey toggles
+        self.root.after(200, self._update_status_labels)
+
     # -------------------------------------------------- key polling thread
     def _key_poll_loop(self):
-        """Background thread: poll aim key at ~1000 Hz so we never miss a press."""
+        """Background thread: poll aim key + recoil key + toggle hotkeys at ~1000 Hz."""
+        prev_aim_toggle = False
+        prev_rc_toggle = False
         while self._key_poll_running:
             try:
+                if win32api is None:
+                    time.sleep(0.01)
+                    continue
+                # Aim activation key
                 cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
-                if win32api is not None and win32api.GetAsyncKeyState(cur_key) & 0x8000:
-                    self._key_is_down = True
-                else:
-                    self._key_is_down = False
-                # Also track recoil trigger key for spray counting
+                self._key_is_down = bool(win32api.GetAsyncKeyState(cur_key) & 0x8000)
+                # Recoil trigger key
                 rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
-                if win32api is not None and win32api.GetAsyncKeyState(rc_key) & 0x8000:
-                    self._recoil_key_is_down = True
-                else:
-                    self._recoil_key_is_down = False
+                self._recoil_key_is_down = bool(win32api.GetAsyncKeyState(rc_key) & 0x8000)
+
+                # --- Toggle hotkeys (edge-triggered: fire on key-down transition) ---
+                aim_hk = HOTKEY_OPTIONS.get(self.aim_toggle_key_var.get(), 0x74)
+                aim_hk_down = bool(win32api.GetAsyncKeyState(aim_hk) & 0x8000)
+                if aim_hk_down and not prev_aim_toggle:
+                    new_val = not self.aim_enabled_var.get()
+                    self.root.after(0, self.aim_enabled_var.set, new_val)
+                    voice = self.voice_enabled_var.get()
+                    _play_notification("开启自瞄" if new_val else "关闭自瞄", voice, on=new_val)
+                prev_aim_toggle = aim_hk_down
+
+                rc_hk = HOTKEY_OPTIONS.get(self.recoil_toggle_key_var.get(), 0x75)
+                rc_hk_down = bool(win32api.GetAsyncKeyState(rc_hk) & 0x8000)
+                if rc_hk_down and not prev_rc_toggle:
+                    new_val = not self.recoil_enabled_var.get()
+                    self.root.after(0, self.recoil_enabled_var.set, new_val)
+                    voice = self.voice_enabled_var.get()
+                    _play_notification("开启压枪" if new_val else "关闭压枪", voice, on=new_val)
+                prev_rc_toggle = rc_hk_down
+
             except Exception:
                 self._key_is_down = False
                 self._recoil_key_is_down = False
@@ -469,6 +606,8 @@ class VisionViewerApp:
             "recoilSmooth": self.recoil_smooth_var.get(),
             "recoilKey": KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01),
             "aaTeamFilter": TEAM_OPTIONS.get(self.team_var.get(), "all"),
+            "aimToggleKey": HOTKEY_OPTIONS.get(self.aim_toggle_key_var.get(), 0x74),
+            "recoilToggleKey": HOTKEY_OPTIONS.get(self.recoil_toggle_key_var.get(), 0x75),
         }
         try:
             save_config_values(vals)
@@ -926,8 +1065,9 @@ class VisionViewerApp:
             rc_strength = self.recoil_strength_var.get()
             rc_mag = get_mag_size(rc_weapon)
             rc_smooth = max(self.recoil_smooth_var.get(), 1)
+            rc_enabled = self.recoil_enabled_var.get()
 
-            if rc_mag > 0 and rc_strength > 0:
+            if rc_enabled and rc_mag > 0 and rc_strength > 0:
                 if cur_lmb and not prev_lmb:
                     # LMB just pressed — start spray
                     spray_start_time = time.perf_counter()
