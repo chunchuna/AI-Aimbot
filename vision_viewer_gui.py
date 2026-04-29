@@ -322,7 +322,7 @@ class VisionViewerApp:
         self.smooth_label.pack(side="right")
         tk.Scale(right, from_=1.0, to=10.0, orient="horizontal", variable=self.smooth_var,
                  resolution=0.1, command=lambda v: self.smooth_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
-        ttk.Label(right, text="1.0=线性  越大=近距离刹车越强(防过冲)", font=("", 8)).pack(anchor="w")
+        ttk.Label(right, text="1=瞬锁 3=平滑跟踪 5+=很柔和", font=("", 8)).pack(anchor="w")
 
         # Movement amp
         f5 = ttk.Frame(right); f5.pack(fill="x", pady=2)
@@ -602,6 +602,7 @@ class VisionViewerApp:
         perf_count = 0
         render_counter = 0
         RENDER_EVERY_N = 3  # Only render preview every N frames for performance
+        cv_window_created = False
 
         # Recoil spray tracking
         spray_start_time = 0.0   # When left-click started (for bullet index calc)
@@ -609,6 +610,10 @@ class VisionViewerApp:
         last_recoil_idx = -1     # Last bullet index we applied recoil for
         recoil_accum_x = 0.0     # Cumulative recoil mouse offset applied
         recoil_accum_y = 0.0
+
+        # EMA output smoothing to reduce jitter
+        ema_mx = 0.0             # EMA-smoothed mouse move X
+        ema_my = 0.0             # EMA-smoothed mouse move Y
 
         print("===== Aim loop started =====")
         print(f"  win32api loaded = {win32api is not None}")
@@ -799,31 +804,38 @@ class VisionViewerApp:
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
-                    # --- Distance-based proportional damping ---
-                    # The closer to target, the slower we move (prevents overshoot).
-                    # damping_factor goes from ~0 (at target) to ~1 (far away).
-                    # Reference radius: half the capture area diagonal
-                    DAMP_REF = (cWidth**2 + cHeight**2) ** 0.5
-                    # Normalize distance to 0~1 range
-                    ratio = min(raw_dist / DAMP_REF, 1.0) if DAMP_REF > 0 else 1.0
-                    # Power curve: smooth controls steepness (1.0=linear, 2.0=quadratic brake)
-                    # Higher smooth = stronger braking near target
-                    damping = ratio ** cur_smooth
-                    # Final move = raw offset * amp * damping
-                    sX = rawX * cur_amp * damping
-                    sY = rawY * cur_amp * damping
-                    mX, mY = round(sX), round(sY)
+                    # --- Proportional move + EMA smoothing ---
+                    # Step 1: Proportional — move a fraction of remaining distance.
+                    #   smooth=1 → move 100% per frame (instant snap)
+                    #   smooth=3 → move 33% per frame (smooth tracking)
+                    #   smooth=5 → move 20% per frame (very smooth)
+                    # amp scales the base speed.
+                    frac = cur_amp / max(cur_smooth, 0.5)
+                    desiredX = rawX * frac
+                    desiredY = rawY * frac
 
-                    # Dead zone: ignore tiny movements to prevent jitter on target
+                    # Step 2: EMA on output — filters detection jitter.
+                    # Higher EMA_ALPHA = more responsive, lower = smoother
+                    EMA_ALPHA = 0.5
+                    ema_mx = EMA_ALPHA * desiredX + (1 - EMA_ALPHA) * ema_mx
+                    ema_my = EMA_ALPHA * desiredY + (1 - EMA_ALPHA) * ema_my
+
+                    mX, mY = round(ema_mx), round(ema_my)
+
+                    # Dead zone: ignore sub-pixel jitter when on target
                     if abs(mX) <= 1 and abs(mY) <= 1 and raw_dist < 3:
                         mX, mY = 0, 0
+                        ema_mx, ema_my = 0.0, 0.0
 
                     if keyDown and (mX != 0 or mY != 0):
                         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
                         # Log at most once per second to avoid spam
                         if now_t - aim_log_timer > 1:
-                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} damp={damping:.3f} move=({mX},{mY}) amp={cur_amp} smooth={cur_smooth}")
+                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) amp={cur_amp} smooth={cur_smooth}")
                             aim_log_timer = now_t
+                    else:
+                        # Reset EMA when not aiming to avoid stale momentum
+                        ema_mx, ema_my = 0.0, 0.0
 
                     if display is not None:
                         cv2.circle(display, (int(xMid), int(aim_y_abs)), 5, (0, 0, 255), -1)
@@ -901,6 +913,9 @@ class VisionViewerApp:
                 cv2.putText(display, f"Aim:{aim_status} Key:{self.key_var.get()} Target:{cur_target}",
                             (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
                 cv2.imshow("AI Vision Viewer", display)
+                if not cv_window_created:
+                    cv2.setWindowProperty("AI Vision Viewer", cv2.WND_PROP_TOPMOST, 1)
+                    cv_window_created = True
                 if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
                     break
             else:
