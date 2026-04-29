@@ -189,6 +189,13 @@ TEAM_OPTIONS = {
 }
 TEAM_VALUE_TO_NAME = {v: k for k, v in TEAM_OPTIONS.items()}
 
+# Aim mode: aimbot (full takeover) vs aim assist (additive pull, user keeps control)
+AIM_MODE_OPTIONS = {
+    "自瞄 (Aimbot)": "aimbot",
+    "辅助瞄准 (Assist)": "assist",
+}
+AIM_MODE_VALUE_TO_NAME = {v: k for k, v in AIM_MODE_OPTIONS.items()}
+
 # Hotkey options for toggle keys (keyboard keys only)
 HOTKEY_OPTIONS = {
     "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
@@ -307,6 +314,10 @@ class VisionViewerApp:
         self.target_var = tk.StringVar()
         cur_target = _read_config_value("aaTargetPart", "head", str)
         self.target_var.set(TARGET_VALUE_TO_NAME.get(cur_target, "头部 (Head)"))
+
+        self.aim_mode_var = tk.StringVar()
+        cur_aim_mode = _read_config_value("aaAimMode", "aimbot", str)
+        self.aim_mode_var.set(AIM_MODE_VALUE_TO_NAME.get(cur_aim_mode, "自瞄 (Aimbot)"))
 
         self.key_var = tk.StringVar()
         cur_key = _read_config_hex("aaActivateKey", 0x02)
@@ -513,6 +524,12 @@ class VisionViewerApp:
         f1 = ttk.Frame(right); f1.pack(fill="x", pady=2)
         ttk.Label(f1, text="锁定位置:").pack(side="left")
         ttk.Combobox(f1, textvariable=self.target_var, values=list(TARGET_OPTIONS.keys()),
+                     state="readonly", width=20).pack(side="right")
+
+        # Aim mode
+        f_aim_mode = ttk.Frame(right); f_aim_mode.pack(fill="x", pady=2)
+        ttk.Label(f_aim_mode, text="自瞄模式:").pack(side="left")
+        ttk.Combobox(f_aim_mode, textvariable=self.aim_mode_var, values=list(AIM_MODE_OPTIONS.keys()),
                      state="readonly", width=20).pack(side="right")
 
         # Activate key
@@ -751,6 +768,7 @@ class VisionViewerApp:
         """Collect current GUI values into a dict (used for save & profile)."""
         return {
             "aaFOV": self.fov_var.get(),
+            "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
             "aaActivateKey": KEY_OPTIONS.get(self.key_var.get(), 0x02),
@@ -783,6 +801,9 @@ class VisionViewerApp:
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
+        if "aaAimMode" in vals:
+            v = vals["aaAimMode"]
+            self.aim_mode_var.set(AIM_MODE_VALUE_TO_NAME.get(v, "自瞄 (Aimbot)"))
         if "aaSmoothFactor" in vals:
             self.smooth_var.set(float(vals["aaSmoothFactor"]))
         if "aaActivateKey" in vals:
@@ -1030,6 +1051,7 @@ class VisionViewerApp:
                 self._model_input_dtype = model_dtype
                 self._model_input_name = inp.name
                 self._model_output_format = out_fmt
+                self._model_skip_normalize = self._check_skip_normalize(path, out_fmt)
                 if out_fmt == "yolox":
                     # Pre-build YOLOX decode grids
                     grid_x_list, grid_y_list, stride_list = [], [], []
@@ -1048,6 +1070,18 @@ class VisionViewerApp:
         except Exception as e:
             self.model_status_label.configure(text=f"加载失败!", foreground="red")
             messagebox.showerror("模型加载失败", str(e))
+
+    @staticmethod
+    def _check_skip_normalize(model_path, out_fmt):
+        """Check if model needs raw 0-255 input (skip /255 normalization).
+        YOLOX always skips. Models with '77-' prefix are known to need raw input."""
+        if out_fmt == "yolox":
+            return True
+        basename = os.path.basename(model_path)
+        if basename.startswith("77-"):
+            print(f"[MODEL] 77-series model detected, using raw 0-255 input")
+            return True
+        return False
 
     def _create_onnx_session(self, model_path):
         if ort is None:
@@ -1113,9 +1147,10 @@ class VisionViewerApp:
                 self._model_output_format = "v5"
         else:
             self._model_output_format = "v5"
+        self._model_skip_normalize = self._check_skip_normalize(path, self._model_output_format)
         self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {self._model_output_format})", foreground="green")
         self.status_var.set("模型已加载。")
-        print(f"[MODEL] Loaded: {path}  input={inp.name} {model_w}x{model_h} dtype={self._model_input_dtype} format={self._model_output_format}")
+        print(f"[MODEL] Loaded: {path}  input={inp.name} {model_w}x{model_h} dtype={self._model_input_dtype} format={self._model_output_format} skip_norm={self._model_skip_normalize}")
 
     # --------------------------------------------------------- start/stop
     def start_viewer(self):
@@ -1290,9 +1325,10 @@ class VisionViewerApp:
             with self._model_lock:
                 model_dtype = self._model_input_dtype
                 out_fmt = self._model_output_format
-            if out_fmt == "yolox":
-                # YOLOX expects 0-255 input (no normalization)
-                im = np.expand_dims(im_resized, 0).astype(model_dtype)
+                skip_norm = getattr(self, '_model_skip_normalize', False)
+            if skip_norm:
+                # Model expects 0-255 raw RGB pixel input (bettercam gives BGR, so convert)
+                im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype)
             else:
                 im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
             im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
@@ -1640,45 +1676,80 @@ class VisionViewerApp:
                         aim_y_abs = y1_box + box_h * 0.08
                         aim_x_abs = x1_box + box_w * 0.5
 
-                    # --- Osiris-style unified aim offset ---
+                    # --- Unified aim offset ---
                     # Raw pixel offset from screen center to aim point
                     rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
 
-                    # During active spray, suppress Y-axis aim correction.
-                    # Vertical control is handled entirely by the recoil pattern;
-                    # aim only tracks horizontally (X) for spray transfer.
-                    spraying = (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
-                    if spraying:
-                        rawY = 0.0
-
+                    cur_aim_mode = AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot")
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
-                    # --- Osiris-style smoothing: offset / smooth ---
-                    # No EMA, no momentum. Pure proportional each frame.
-                    # smooth=1 → instant, smooth=3 → 33% per frame, etc.
-                    smooth_div = max(cur_smooth, 1.0)
-                    moveX = rawX * cur_amp / smooth_div
-                    moveY = rawY * cur_amp / smooth_div
+                    if cur_aim_mode == "assist":
+                        # --- Aim Assist mode ---
+                        # Additive pull toward target. User keeps full mouse control.
+                        # Pull strength = proportional to offset, scaled by proximity:
+                        #   - Far from target (near FOV edge): weak pull
+                        #   - Close to target: stronger pull (helps stick)
+                        # The pull is a fraction of the offset, much weaker than aimbot.
+                        assist_fov = max(cur_fov, 100)  # effective FOV for falloff calc
+                        # Proximity factor: 1.0 when on target, ~0.2 at FOV edge
+                        proximity = max(0.0, 1.0 - (raw_dist / assist_fov))
+                        # Pull strength: base 15-30% of offset, boosted by proximity
+                        pull_pct = 0.15 + 0.20 * proximity  # 15% at edge → 35% on target
+                        pull_pct /= max(cur_smooth, 1.0)     # user smooth still applies
+                        moveX = rawX * pull_pct * cur_amp
+                        moveY = rawY * pull_pct * cur_amp
 
-                    # Clamp per-frame movement to MAX_PIXEL_DELTA (anti-overshoot)
-                    move_mag = (moveX**2 + moveY**2) ** 0.5
-                    if move_mag > MAX_PIXEL_DELTA:
-                        scale = MAX_PIXEL_DELTA / move_mag
-                        moveX *= scale
-                        moveY *= scale
+                        # Softer clamp for assist (half of aimbot max)
+                        assist_max = MAX_PIXEL_DELTA * 0.5
+                        move_mag = (moveX**2 + moveY**2) ** 0.5
+                        if move_mag > assist_max:
+                            scale_f = assist_max / move_mag
+                            moveX *= scale_f
+                            moveY *= scale_f
 
-                    mX, mY = round(moveX), round(moveY)
+                        mX, mY = round(moveX), round(moveY)
+                        # Tighter dead zone for assist
+                        if abs(mX) <= 1 and abs(mY) <= 1:
+                            mX, mY = 0, 0
 
-                    # Dead zone: suppress sub-pixel jitter when nearly on target
-                    if abs(mX) <= 1 and abs(mY) <= 1 and raw_dist < 3:
-                        mX, mY = 0, 0
+                        if keyDown and (mX != 0 or mY != 0):
+                            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
+                            if now_t - aim_log_timer > 1:
+                                print(f"[ASSIST] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} pull={pull_pct:.0%} move=({mX},{mY})")
+                                aim_log_timer = now_t
+                    else:
+                        # --- Aimbot mode (original) ---
+                        # During active spray, suppress Y-axis aim correction.
+                        # Vertical control is handled entirely by the recoil pattern;
+                        # aim only tracks horizontally (X) for spray transfer.
+                        spraying = (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
+                        if spraying:
+                            rawY = 0.0
 
-                    if keyDown and (mX != 0 or mY != 0):
-                        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
-                        if now_t - aim_log_timer > 1:
-                            print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) recoil_off=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
-                            aim_log_timer = now_t
+                        # Osiris-style smoothing: offset / smooth
+                        smooth_div = max(cur_smooth, 1.0)
+                        moveX = rawX * cur_amp / smooth_div
+                        moveY = rawY * cur_amp / smooth_div
+
+                        # Clamp per-frame movement to MAX_PIXEL_DELTA (anti-overshoot)
+                        move_mag = (moveX**2 + moveY**2) ** 0.5
+                        if move_mag > MAX_PIXEL_DELTA:
+                            scale_f = MAX_PIXEL_DELTA / move_mag
+                            moveX *= scale_f
+                            moveY *= scale_f
+
+                        mX, mY = round(moveX), round(moveY)
+
+                        # Dead zone: suppress sub-pixel jitter when nearly on target
+                        if abs(mX) <= 1 and abs(mY) <= 1 and raw_dist < 3:
+                            mX, mY = 0, 0
+
+                        if keyDown and (mX != 0 or mY != 0):
+                            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
+                            if now_t - aim_log_timer > 1:
+                                print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) recoil_off=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
+                                aim_log_timer = now_t
 
                     if display is not None:
                         cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)

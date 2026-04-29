@@ -45,6 +45,9 @@ aaTargetPart = "head"
 # "all" = aim at all targets, "ct" = I am CT (aim at T), "t" = I am T (aim at CT)
 aaTeamFilter = "all"
 
+# Aim mode: "aimbot" = full auto-aim (takes over mouse), "assist" = aim assist (additive pull, you keep mouse control)
+aaAimMode = "aimbot"
+
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
 aaSmoothFactor = 4.7
@@ -64,7 +67,7 @@ captureFPS = 266
 recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 2.0
+recoilStrength = 0.5
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
 recoilSmooth = 8
