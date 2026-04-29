@@ -1,11 +1,11 @@
 {
-  "aaFOV": 74,
+  "aaFOV": 238,
   "aaTargetPart": "head",
   "aaSmoothFactor": 4.2,
-  "aaActivateKey": 1,
+  "aaActivateKey": 2,
   "aaMovementAmp": 2.0,
-  "confidence": 0.35,
-  "crosshairYOffset": -9,
+  "confidence": 0.1,
+  "crosshairYOffset": 11,
   "captureFPS": 266,
   "recoilWeapon": "M4A4",
   "recoilStrength": 2.0,
@@ -16,9 +16,9 @@
   "recoilToggleKey": 120,
   "triggerDelay": 0,
   "triggerToggleKey": 121,
-  "selectedModel": "models\\cs2_320.onnx",
+  "selectedModel": "models\\GO_YOLOV11s_敌我_256_头身.onnx",
   "aimEnabled": true,
-  "recoilEnabled": true,
+  "recoilEnabled": false,
   "triggerEnabled": false,
   "voiceEnabled": true
 }

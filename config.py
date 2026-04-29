@@ -12,7 +12,7 @@ maskHeight = 200
 aaMovementAmp = 2.0
 
 # Person Class Confidence
-confidence = 0.35
+confidence = 0.1
 
 # What key to press to quit and shutdown the autoaim
 aaQuitKey = "Q"
@@ -29,7 +29,7 @@ headshot_mode = True
 #   0x06 = X2 mouse button (side button)
 #   0x10 = Shift key
 #   0x11 = Ctrl key
-aaActivateKey = 0x1
+aaActivateKey = 0x2
 
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
@@ -47,11 +47,11 @@ aaSmoothFactor = 4.2
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 74
+aaFOV = 238
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -9
+crosshairYOffset = 11
 
 # Screen capture FPS (30-500)
 captureFPS = 266
@@ -90,7 +90,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\cs2_320.onnx"
+selectedModel = "models\GO_YOLOV11s_敌我_256_头身.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU

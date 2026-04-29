@@ -1225,17 +1225,20 @@ class VisionViewerApp:
 
             # --- Build targets ---
             targets = []
+            head_boxes = []  # Head bounding boxes for 头身 models
             display = image.copy() if do_render else None
-            # Team filter: determine which class IDs are enemies
+            is_headbody_model = "头身" in self.model_var.get()
             cur_team = TEAM_OPTIONS.get(self.team_var.get(), "all")
             # ct=0, t=1 (cs2_320 convention); "all"=aim at everything
             if cur_team == "ct":
-                enemy_cls = {1}      # I am CT → enemies are T (class 1)
+                enemy_cls = {1}
             elif cur_team == "t":
-                enemy_cls = {0}      # I am T → enemies are CT (class 0)
+                enemy_cls = {0}
             else:
                 enemy_cls = None     # None = accept all classes
 
+            # First pass: collect all detections with their info
+            all_dets = []
             for det in pred:
                 if len(det) == 0:
                     continue
@@ -1243,8 +1246,6 @@ class VisionViewerApp:
                     if float(conf_val) < cur_conf:
                         continue
                     cls_id = int(cls)
-                    is_enemy = (enemy_cls is None or cls_id in enemy_cls)
-                    # Scale coordinates from model space back to capture space
                     x1 = float(xyxy[0]) * scale_x
                     y1 = float(xyxy[1]) * scale_y
                     x2 = float(xyxy[2]) * scale_x
@@ -1252,23 +1253,62 @@ class VisionViewerApp:
                     mid_x = (x1 + x2) / 2
                     mid_y = (y1 + y2) / 2
                     box_h = y2 - y1
+                    box_w = x2 - x1
+                    area = box_w * box_h
                     dist = ((mid_x - cWidth)**2 + (mid_y - cHeight)**2) ** 0.5
-                    # Only add enemies as aim targets
+                    ibox = (int(x1), int(y1), int(x2), int(y2))
+                    all_dets.append({"cls": cls_id, "conf": float(conf_val),
+                                     "mid_x": mid_x, "mid_y": mid_y,
+                                     "box_h": box_h, "box_w": box_w, "area": area,
+                                     "dist": dist, "xyxy": ibox})
+
+            if is_headbody_model and len(all_dets) > 0:
+                # For head+body models: a small box contained in a larger box = head
+                # Mark each detection as head or body by checking containment
+                all_dets.sort(key=lambda d: d["area"], reverse=True)  # large first
+                for i, d in enumerate(all_dets):
+                    d["_role"] = "body"  # default
+                    # Check if this box's center is inside any larger box
+                    dx, dy = d["mid_x"], d["mid_y"]
+                    for j in range(i):
+                        big = all_dets[j]
+                        bx1, by1, bx2, by2 = big["xyxy"]
+                        if bx1 <= dx <= bx2 and by1 <= dy <= by2 and d["area"] < big["area"] * 0.5:
+                            d["_role"] = "head"
+                            break
+                for d in all_dets:
+                    if d["_role"] == "head":
+                        head_boxes.append(d)
+                        if display is not None:
+                            color = (0, 255, 255)
+                            label = f"HEAD(c{d['cls']}) {d['conf']:.0%}"
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+                    else:
+                        targets.append(d)
+                        if display is not None:
+                            color = (0, 0, 255)
+                            label = f"BODY(c{d['cls']}) {d['conf']:.0%}"
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            else:
+                # Normal model (no 头身): use standard enemy filter
+                for d in all_dets:
+                    is_enemy = (enemy_cls is None or d["cls"] in enemy_cls)
                     if is_enemy:
-                        targets.append({"mid_x": mid_x, "mid_y": mid_y, "box_h": box_h,
-                                        "dist": dist, "conf": float(conf_val),
-                                        "xyxy": (int(x1), int(y1), int(x2), int(y2))})
+                        targets.append(d)
                     if display is not None:
-                        # Color: red=enemy, blue=friendly, green=all mode
                         if enemy_cls is None:
-                            color = (0, 255, 0)       # all mode: green
+                            color = (0, 255, 0)
                         elif is_enemy:
-                            color = (0, 0, 255)        # enemy: red
+                            color = (0, 0, 255)
                         else:
-                            color = (255, 180, 0)      # friendly: blue/cyan
-                        label = f"{'CT' if cls_id == 0 else 'T'} {float(conf_val):.0%}"
-                        cv2.rectangle(display, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                        cv2.putText(display, label, (int(x1), max(20, int(y1)-8)),
+                            color = (255, 180, 0)
+                        label = f"{'CT' if d['cls'] == 0 else 'T'} {d['conf']:.0%}"
+                        cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                        cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             # --- Aim assist ---
@@ -1305,7 +1345,29 @@ class VisionViewerApp:
                     x1_box, y1_box = t["xyxy"][0], t["xyxy"][1]
                     x2_box = t["xyxy"][2]
                     box_w = x2_box - x1_box
-                    if cur_target == "head":
+
+                    # For head+body models: try to use the actual head bounding box
+                    matched_head = None
+                    if is_headbody_model and cur_target == "head" and head_boxes:
+                        # Find head box whose center is inside or closest to this body box
+                        best_hd = None
+                        best_hd_dist = float("inf")
+                        bx1, by1, bx2, by2 = t["xyxy"]
+                        for hb in head_boxes:
+                            hx, hy = hb["mid_x"], hb["mid_y"]
+                            # Check if head center is inside/near body box
+                            if bx1 <= hx <= bx2 and by1 <= hy <= by2:
+                                hd = ((hx - xMid)**2 + (hy - yMid)**2) ** 0.5
+                                if hd < best_hd_dist:
+                                    best_hd_dist = hd
+                                    best_hd = hb
+                        matched_head = best_hd
+
+                    if matched_head is not None:
+                        # Aim at the center of the matched head bounding box
+                        aim_x_abs = matched_head["mid_x"]
+                        aim_y_abs = matched_head["mid_y"]
+                    elif cur_target == "head":
                         aim_y_abs = y1_box + box_h * 0.08
                         aim_x_abs = x1_box + box_w * 0.5
                     elif cur_target == "chest":
