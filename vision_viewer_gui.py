@@ -806,6 +806,13 @@ class VisionViewerApp:
                     rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
 
+                    # During active spray, suppress Y-axis aim correction.
+                    # Vertical control is handled entirely by the recoil pattern;
+                    # aim only tracks horizontally (X) for spray transfer.
+                    spraying = (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
+                    if spraying:
+                        rawY = 0.0
+
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
                     # --- Osiris-style smoothing: offset / smooth ---
@@ -873,8 +880,6 @@ class VisionViewerApp:
 
                         if win32api is not None and (rc_mx != 0 or rc_my != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
-                            if last_recoil_idx <= 5:
-                                print(f"[RECOIL-DBG] bullet={last_recoil_idx} raw=({dx},{dy}) sent=({rc_mx},{rc_my})")
 
                         recoil_accum_x += rc_mx
                         recoil_accum_y += rc_my
