@@ -40,7 +40,7 @@ except ImportError:
     win32con = None
 
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
-from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_fire_interval_ms, get_mag_size
+from recoil_patterns import WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
@@ -375,8 +375,8 @@ class VisionViewerApp:
         ttk.Label(f_rc2, text="压枪强度:").pack(side="left")
         self.recoil_str_label = ttk.Label(f_rc2, text=f"{self.recoil_strength_var.get():.2f}")
         self.recoil_str_label.pack(side="right")
-        tk.Scale(right, from_=0.0, to=3.0, orient="horizontal", variable=self.recoil_strength_var,
-                 resolution=0.05, command=lambda v: self.recoil_str_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+        tk.Scale(right, from_=0.0, to=100.0, orient="horizontal", variable=self.recoil_strength_var,
+                 resolution=0.5, command=lambda v: self.recoil_str_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
         ttk.Label(right, text="1.0=标准 <1弱补偿 >1强补偿 (按灵敏度调)", font=("", 8)).pack(anchor="w")
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
@@ -781,26 +781,35 @@ class VisionViewerApp:
                     t = targets[0]
                     xMid, yMid, box_h = t["mid_x"], t["mid_y"], t["box_h"]
 
-                    # Calculate aim Y from bounding box top (auto-scales with distance)
-                    # Percentage from top of bounding box:
-                    #   head  = 12% from top (head area)
+                    # Calculate aim point from bounding box (auto-scales with distance)
+                    # Y percentages from top of bounding box:
+                    #   head  = 8% from top (head center)
                     #   chest = 35% from top (upper chest)
                     #   body  = 50% from top (center mass)
                     #   nearest = 50% (center)
-                    y1_box = t["xyxy"][1]
+                    x1_box, y1_box = t["xyxy"][0], t["xyxy"][1]
+                    x2_box = t["xyxy"][2]
+                    box_w = x2_box - x1_box
                     if cur_target == "head":
-                        aim_y_abs = y1_box + box_h * 0.12
+                        aim_y_abs = y1_box + box_h * 0.08
+                        # Head X: use center of upper 15% of box (more accurate
+                        # when model is side-facing, since head is at the top)
+                        aim_x_abs = x1_box + box_w * 0.5
                     elif cur_target == "chest":
                         aim_y_abs = y1_box + box_h * 0.35
+                        aim_x_abs = xMid
                     elif cur_target == "body":
                         aim_y_abs = y1_box + box_h * 0.50
+                        aim_x_abs = xMid
                     elif cur_target == "nearest":
                         aim_y_abs = yMid
+                        aim_x_abs = xMid
                     else:
-                        aim_y_abs = y1_box + box_h * 0.12
+                        aim_y_abs = y1_box + box_h * 0.08
+                        aim_x_abs = x1_box + box_w * 0.5
 
                     # Raw pixel offset from screen center to aim point
-                    rawX = xMid - cWidth
+                    rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
@@ -838,15 +847,15 @@ class VisionViewerApp:
                         ema_mx, ema_my = 0.0, 0.0
 
                     if display is not None:
-                        cv2.circle(display, (int(xMid), int(aim_y_abs)), 5, (0, 0, 255), -1)
+                        cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
             # --- Recoil compensation (independent of aim assist) ---
             cur_lmb = self._lmb_is_down
             rc_weapon = self.recoil_weapon_var.get()
             rc_strength = self.recoil_strength_var.get()
-            rc_interval = get_fire_interval_ms(rc_weapon)
+            rc_mag = get_mag_size(rc_weapon)
 
-            if rc_interval > 0 and rc_strength > 0:
+            if rc_mag > 0 and rc_strength > 0:
                 if cur_lmb and not prev_lmb:
                     # LMB just pressed — start spray
                     spray_start_time = time.perf_counter()
@@ -855,32 +864,36 @@ class VisionViewerApp:
                     recoil_accum_y = 0.0
 
                 if cur_lmb and spray_start_time > 0:
-                    # Calculate which bullet we're on
+                    # Calculate which bullet we're on using per-bullet timing
                     elapsed_ms = (time.perf_counter() - spray_start_time) * 1000.0
-                    bullet_idx = int(elapsed_ms / rc_interval)
-                    mag = get_mag_size(rc_weapon)
-                    if mag > 0:
-                        bullet_idx = min(bullet_idx, mag - 1)
+                    # Walk through pattern, summing each bullet's delay to find current bullet
+                    cumulative_ms = 0.0
+                    bullet_idx = 0
+                    for bi in range(rc_mag):
+                        interval = get_fire_interval_ms(rc_weapon, bi)
+                        if cumulative_ms + interval > elapsed_ms:
+                            break
+                        cumulative_ms += interval
+                        bullet_idx = bi + 1
+                    bullet_idx = min(bullet_idx, rc_mag - 1)
 
-                    if bullet_idx > last_recoil_idx:
-                        # Apply recoil compensation for new bullets since last frame
-                        cum_dx, cum_dy = get_recoil_offset(rc_weapon, bullet_idx)
-                        # Delta from what we've already applied
-                        delta_x = cum_dx * rc_strength - recoil_accum_x
-                        delta_y = cum_dy * rc_strength - recoil_accum_y
-                        rc_mx, rc_my = round(delta_x), round(delta_y)
+                    # Apply deltas for all new bullets since last frame
+                    while last_recoil_idx < bullet_idx:
+                        last_recoil_idx += 1
+                        dx, dy = get_bullet_delta(rc_weapon, last_recoil_idx)
+                        rc_mx = round(dx * rc_strength)
+                        rc_my = round(dy * rc_strength)
 
                         if win32api is not None and (rc_mx != 0 or rc_my != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
 
                         recoil_accum_x += rc_mx
                         recoil_accum_y += rc_my
-                        last_recoil_idx = bullet_idx
 
-                        # Log recoil (at most once per second)
-                        now_rc = time.time()
-                        if now_rc - debug_timer > 0.5:
-                            print(f"[RECOIL] weapon={rc_weapon} bullet={bullet_idx} delta=({rc_mx},{rc_my}) accum=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
+                    # Log recoil (at most once per second)
+                    now_rc = time.time()
+                    if now_rc - debug_timer > 0.5:
+                        print(f"[RECOIL] weapon={rc_weapon} bullet={last_recoil_idx} accum=({recoil_accum_x:.0f},{recoil_accum_y:.0f}) strength={rc_strength}")
 
                 if not cur_lmb and prev_lmb:
                     # LMB released — reset spray

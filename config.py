@@ -39,7 +39,7 @@ aaTargetPart = "head"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.0
+aaSmoothFactor = 2.6
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
@@ -53,10 +53,10 @@ crosshairYOffset = -10
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "AK-47"
+recoilWeapon = "关闭 (Off)"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 1.0
+recoilStrength = 8.5
 
 # Displays the Corrections per second in the terminal
 cpsDisplay = True
