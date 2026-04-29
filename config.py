@@ -33,7 +33,7 @@ aaActivateKey = 0x2
 
 # Secondary aim activation key (0=disabled)
 # Common: 0x05=X1 side button, 0x06=X2 side button
-aaSecondaryKey = 0x0
+aaSecondaryKey = 0x5
 
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
@@ -43,15 +43,15 @@ aaTargetPart = "head"
 
 # Team filter for enemy identification (requires multi-class model like cs2_320)
 # "all" = aim at all targets, "ct" = I am CT (aim at T), "t" = I am T (aim at CT)
-aaTeamFilter = "ct"
+aaTeamFilter = "all"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 3.6
+aaSmoothFactor = 4.7
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 75
+aaFOV = 187
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
@@ -67,7 +67,7 @@ recoilWeapon = "AK-47"
 recoilStrength = 2.0
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
-recoilSmooth = 6
+recoilSmooth = 8
 
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
@@ -94,7 +94,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\GO_YOLOV11s_敌我_256_头身.onnx"
+selectedModel = "models\416-vx-0警1头2匪3头.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU

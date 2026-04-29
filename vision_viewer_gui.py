@@ -1011,18 +1011,38 @@ class VisionViewerApp:
             model_h = int(shape[2]) if len(shape) >= 4 else 320
             model_w = int(shape[3]) if len(shape) >= 4 else 320
             model_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
-            # Detect output format: v5=[1,N,85] vs v8=[1,5+nc,anchors]
+            # Detect output format: yolox / v8 / v5
             out_shape = new_model.get_outputs()[0].shape
+            out_fmt = "v5"
             if len(out_shape) == 3 and out_shape[1] is not None and out_shape[2] is not None:
-                out_fmt = "v8" if int(out_shape[1]) < int(out_shape[2]) else "v5"
-            else:
-                out_fmt = "v5"
+                dim1, dim2 = int(out_shape[1]), int(out_shape[2])
+                yolox_strides = [8, 16, 32]
+                yolox_expected = sum((model_h // s) * (model_w // s) for s in yolox_strides)
+                if dim1 == yolox_expected and dim2 < dim1:
+                    out_fmt = "yolox"
+                elif dim1 < dim2:
+                    out_fmt = "v8"
+                else:
+                    out_fmt = "v5"
             with self._model_lock:
                 self.model = new_model
                 self._model_input_size = (model_w, model_h)
                 self._model_input_dtype = model_dtype
                 self._model_input_name = inp.name
                 self._model_output_format = out_fmt
+                if out_fmt == "yolox":
+                    # Pre-build YOLOX decode grids
+                    grid_x_list, grid_y_list, stride_list = [], [], []
+                    for s in yolox_strides:
+                        gs_h, gs_w = model_h // s, model_w // s
+                        yv, xv = np.meshgrid(np.arange(gs_h), np.arange(gs_w), indexing='ij')
+                        grid_x_list.append(xv.flatten())
+                        grid_y_list.append(yv.flatten())
+                        stride_list.append(np.full(gs_h * gs_w, s))
+                    self._yolox_grid_x = np.concatenate(grid_x_list).astype(np.float32)
+                    self._yolox_grid_y = np.concatenate(grid_y_list).astype(np.float32)
+                    self._yolox_stride = np.concatenate(stride_list).astype(np.float32)
+                    print(f"[MODEL] YOLOX detected: {yolox_expected} anchors, strides={yolox_strides}")
             self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {out_fmt})", foreground="green")
             print(f"[MODEL] Switched to: {path}  input={inp.name} {model_w}x{model_h} dtype={inp.type} format={out_fmt} out_shape={out_shape}")
         except Exception as e:
@@ -1064,8 +1084,33 @@ class VisionViewerApp:
         self._model_input_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
         self._model_input_name = inp.name
         out_shape = self.model.get_outputs()[0].shape
+        print(f"[MODEL] out_shape={out_shape} len={len(out_shape)} types={[type(x).__name__ for x in out_shape]}")
         if len(out_shape) == 3 and out_shape[1] is not None and out_shape[2] is not None:
-            self._model_output_format = "v8" if int(out_shape[1]) < int(out_shape[2]) else "v5"
+            dim1, dim2 = int(out_shape[1]), int(out_shape[2])
+            # Check for YOLOX: anchor-free, 1 anchor per grid cell
+            # Expected anchors = sum((input_size/stride)^2) for strides [8,16,32]
+            yolox_strides = [8, 16, 32]
+            yolox_expected = sum((model_h // s) * (model_w // s) for s in yolox_strides)
+            print(f"[MODEL] dim1={dim1} dim2={dim2} yolox_expected={yolox_expected} match={dim1 == yolox_expected}")
+            if dim1 == yolox_expected and dim2 < dim1:
+                # YOLOX format: [1, N_anchors, 5+nc] with raw bbox needing grid decode
+                self._model_output_format = "yolox"
+                # Pre-build decode grids
+                grid_x_list, grid_y_list, stride_list = [], [], []
+                for s in yolox_strides:
+                    gs_h, gs_w = model_h // s, model_w // s
+                    yv, xv = np.meshgrid(np.arange(gs_h), np.arange(gs_w), indexing='ij')
+                    grid_x_list.append(xv.flatten())
+                    grid_y_list.append(yv.flatten())
+                    stride_list.append(np.full(gs_h * gs_w, s))
+                self._yolox_grid_x = np.concatenate(grid_x_list).astype(np.float32)
+                self._yolox_grid_y = np.concatenate(grid_y_list).astype(np.float32)
+                self._yolox_stride = np.concatenate(stride_list).astype(np.float32)
+                print(f"[MODEL] YOLOX detected: {yolox_expected} anchors, strides={yolox_strides}")
+            elif dim1 < dim2:
+                self._model_output_format = "v8"
+            else:
+                self._model_output_format = "v5"
         else:
             self._model_output_format = "v5"
         self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {self._model_output_format})", foreground="green")
@@ -1244,7 +1289,12 @@ class VisionViewerApp:
                 scale_y = 1.0
             with self._model_lock:
                 model_dtype = self._model_input_dtype
-            im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
+                out_fmt = self._model_output_format
+            if out_fmt == "yolox":
+                # YOLOX expects 0-255 input (no normalization)
+                im = np.expand_dims(im_resized, 0).astype(model_dtype)
+            else:
+                im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
             im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
 
             t_infer_start = time.perf_counter()
@@ -1255,7 +1305,53 @@ class VisionViewerApp:
                     outputs = self.model.run(None, {input_name: im})
                 raw = outputs[0]
 
-                if out_fmt == "v8":
+                if out_fmt == "yolox":
+                    # YOLOX: [1, N_anchors, 5+nc] — bbox is raw (needs grid decode), obj+cls are sigmoid
+                    with self._model_lock:
+                        gx = self._yolox_grid_x
+                        gy = self._yolox_grid_y
+                        gs = self._yolox_stride
+                    boxes_raw = raw[0]  # [N, 5+nc]
+                    # Decode bbox: cx = (raw_x + grid_x) * stride, cy = (raw_y + grid_y) * stride
+                    #              w  = exp(raw_w) * stride,        h  = exp(raw_h) * stride
+                    dec_cx = (boxes_raw[:, 0] + gx) * gs
+                    dec_cy = (boxes_raw[:, 1] + gy) * gs
+                    dec_w  = np.exp(boxes_raw[:, 2]) * gs
+                    dec_h  = np.exp(boxes_raw[:, 3]) * gs
+                    obj_conf = boxes_raw[:, 4]             # already sigmoid
+                    cls_conf = boxes_raw[:, 5:]            # already sigmoid
+                    nc = cls_conf.shape[1]
+                    if nc > 1:
+                        class_ids = np.argmax(cls_conf, axis=1)
+                        class_max = np.max(cls_conf, axis=1)
+                    else:
+                        class_ids = np.zeros(len(obj_conf), dtype=int)
+                        class_max = cls_conf[:, 0]
+                    confs = obj_conf * class_max            # final score
+                    mask = confs > cur_conf
+                    pred = []
+                    if mask.any():
+                        cx_f, cy_f = dec_cx[mask], dec_cy[mask]
+                        w_f, h_f = dec_w[mask], dec_h[mask]
+                        x1 = cx_f - w_f / 2
+                        y1 = cy_f - h_f / 2
+                        x2 = cx_f + w_f / 2
+                        y2 = cy_f + h_f / 2
+                        confs_f = confs[mask]
+                        class_ids_f = class_ids[mask].astype(np.float32)
+                        dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f], axis=1))
+                        order = torch.argsort(dets[:, 4], descending=True)
+                        dets = dets[order[:50]]
+                        keep = []
+                        while len(dets) > 0 and len(keep) < 10:
+                            keep.append(dets[0])
+                            if len(dets) == 1:
+                                break
+                            ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
+                            dets = dets[1:][ious < 0.45]
+                        pred = [torch.stack(keep)] if keep else []
+
+                elif out_fmt == "v8":
                     # YOLOv8 output: [1, 4+nc, anchors] → transpose to [1, anchors, 4+nc]
                     raw_t = np.transpose(raw, (0, 2, 1))  # [1, 8400, 5]
                     # raw_t format per row: [cx, cy, w, h, conf_cls0, conf_cls1, ...]
@@ -1317,15 +1413,52 @@ class VisionViewerApp:
             targets = []
             head_boxes = []  # Head bounding boxes for 头身 models
             display = image.copy() if do_render else None
-            is_headbody_model = "头身" in self.model_var.get()
+            model_name = self.model_var.get()
+            # Detect head+body model: "头身" OR filename contains class-head mapping like "0警1头2匪3头"
+            is_headbody_model = "头身" in model_name or "头" in model_name
+            # Parse explicit head/body class IDs from filename (e.g. "0警1头2匪3头")
+            # Pattern: digit + label, where "头" = head class, anything else = body class
+            head_cls_ids = set()
+            body_cls_ids = set()
+            ct_body_cls = set()
+            t_body_cls = set()
+            if is_headbody_model:
+                import re as _re
+                # Match patterns like "0警", "1头", "2匪", "3头" in filename
+                cls_matches = _re.findall(r'(\d+)([\u4e00-\u9fff]+)', os.path.basename(model_name))
+                if cls_matches:
+                    for cid_str, label in cls_matches:
+                        cid = int(cid_str)
+                        if "头" in label:
+                            head_cls_ids.add(cid)
+                        else:
+                            body_cls_ids.add(cid)
+                            if "警" in label:
+                                ct_body_cls.add(cid)
+                            elif "匪" in label:
+                                t_body_cls.add(cid)
+            has_explicit_cls = len(head_cls_ids) > 0 and len(body_cls_ids) > 0
+
             cur_team = TEAM_OPTIONS.get(self.team_var.get(), "all")
-            # ct=0, t=1 (cs2_320 convention); "all"=aim at everything
-            if cur_team == "ct":
-                enemy_cls = {1}
-            elif cur_team == "t":
-                enemy_cls = {0}
+            # Team filter: depends on model type
+            if has_explicit_cls:
+                # 4-class model: CT-body/T-body are separate classes
+                if cur_team == "ct":
+                    enemy_body_cls = t_body_cls   # I am CT → aim at T bodies
+                elif cur_team == "t":
+                    enemy_body_cls = ct_body_cls   # I am T → aim at CT bodies
+                else:
+                    enemy_body_cls = body_cls_ids   # aim at all bodies
+                enemy_cls = None  # not used in explicit mode
             else:
-                enemy_cls = None     # None = accept all classes
+                # 2-class model (cs2_320 convention): ct=0, t=1
+                if cur_team == "ct":
+                    enemy_cls = {1}
+                elif cur_team == "t":
+                    enemy_cls = {0}
+                else:
+                    enemy_cls = None     # None = accept all classes
+                enemy_body_cls = None
 
             # First pass: collect all detections with their info
             all_dets = []
@@ -1352,9 +1485,43 @@ class VisionViewerApp:
                                      "box_h": box_h, "box_w": box_w, "area": area,
                                      "dist": dist, "xyxy": ibox})
 
-            if is_headbody_model and len(all_dets) > 0:
-                # For head+body models: a small box contained in a larger box = head
-                # Mark each detection as head or body by checking containment
+            if is_headbody_model and has_explicit_cls and len(all_dets) > 0:
+                # Explicit class-ID model (e.g. 0警1头2匪3头): use class IDs directly
+                for d in all_dets:
+                    cls_id = d["cls"]
+                    if cls_id in head_cls_ids:
+                        d["_role"] = "head"
+                        head_boxes.append(d)
+                        if display is not None:
+                            color = (0, 255, 255)
+                            label = f"HEAD(c{cls_id}) {d['conf']:.0%}"
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+                    elif cls_id in body_cls_ids:
+                        d["_role"] = "body"
+                        # Apply team filter for bodies
+                        if enemy_body_cls is None or cls_id in enemy_body_cls:
+                            targets.append(d)
+                        if display is not None:
+                            is_enemy = (enemy_body_cls is None or cls_id in enemy_body_cls)
+                            color = (0, 0, 255) if is_enemy else (255, 180, 0)
+                            side = "CT" if cls_id in ct_body_cls else "T"
+                            label = f"{side}(c{cls_id}) {d['conf']:.0%}"
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    else:
+                        # Unknown class — treat as body, add to targets
+                        d["_role"] = "body"
+                        targets.append(d)
+                        if display is not None:
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], (0, 255, 0), 2)
+                            cv2.putText(display, f"c{cls_id} {d['conf']:.0%}", (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+            elif is_headbody_model and len(all_dets) > 0:
+                # Geometric containment model (e.g. GO_头身): small box inside big box = head
                 all_dets.sort(key=lambda d: d["area"], reverse=True)  # large first
                 for i, d in enumerate(all_dets):
                     d["_role"] = "body"  # default
