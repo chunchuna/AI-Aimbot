@@ -12,7 +12,7 @@ maskHeight = 200
 aaMovementAmp = 0.6
 
 # Person Class Confidence
-confidence = 0.1
+confidence = 0.3
 
 # What key to press to quit and shutdown the autoaim
 aaQuitKey = "Q"
@@ -33,7 +33,7 @@ aaActivateKey = 0x2
 
 # Secondary aim activation key (0=disabled)
 # Common: 0x05=X1 side button, 0x06=X2 side button
-aaSecondaryKey = 0x5
+aaSecondaryKey = 0x10
 
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
@@ -50,7 +50,7 @@ aaAimMode = "aimbot"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.0
+aaSmoothFactor = 1.4
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
@@ -58,13 +58,13 @@ aaFOV = 137
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = 11
+crosshairYOffset = -8
 
 # Screen capture FPS (30-500)
-captureFPS = 266
+captureFPS = 292
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "关闭 (Off)"
+recoilWeapon = "M4A4"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
 recoilStrength = 1.0
@@ -79,7 +79,7 @@ recoilKey = 1
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
-aimToggleKey = 117
+aimToggleKey = 116
 recoilToggleKey = 36
 triggerToggleKey = 123
 
@@ -89,7 +89,7 @@ rigidWeapon = "AK-47"
 # CS2 in-game sensitivity (MUST match your game setting for accurate recoil control)
 cs2Sensitivity = 1.08
 # Smoothness: steps=sub-moves per bullet (1=instant, 2~3=moderate, 5+=smooth)
-rigidSteps = 4
+rigidSteps = 2
 # Delay between sub-steps in ms (recommended: 1step=100, 2steps=25, 5steps=4)
 rigidDelay1 = 100
 # Extra delay after all sub-steps in ms (usually 0)
@@ -102,11 +102,11 @@ antiflashDelay = 0.5
 antiflashConf = 0.5
 
 # Color detection mode (找色模式) — use HSV color instead of AI model
-colorPreset = "黄色 (Yellow)"
-colorHLow = 20
-colorSLow = 125
-colorVLow = 150
-colorHHigh = 40
+colorPreset = "青色 (Cyan)"
+colorHLow = 80
+colorSLow = 100
+colorVLow = 100
+colorHHigh = 100
 colorSHigh = 255
 colorVHigh = 255
 colorSmooth = 0.05
@@ -126,7 +126,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\416-vx-0警1头2匪3头.onnx"
+selectedModel = "models\GO_YOLOV11n_敌我_256_头身.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU
