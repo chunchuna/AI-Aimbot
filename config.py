@@ -9,10 +9,10 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 1.3
+aaMovementAmp = 1.05
 
 # Person Class Confidence
-confidence = 0.1
+confidence = 0.3
 
 # What key to press to quit and shutdown the autoaim
 aaQuitKey = "Q"
@@ -29,7 +29,7 @@ headshot_mode = True
 #   0x06 = X2 mouse button (side button)
 #   0x10 = Shift key
 #   0x11 = Ctrl key
-aaActivateKey = 0x1
+aaActivateKey = 0x2
 
 # Secondary aim activation key (0=disabled)
 # Common: 0x05=X1 side button, 0x06=X2 side button
@@ -50,21 +50,21 @@ aaAimMode = "aimbot"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.9
+aaSmoothFactor = 1.0
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 202
+aaFOV = 63
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = 21
+crosshairYOffset = -9
 
 # Screen capture FPS (30-500)
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "M4A4"
+recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
 recoilStrength = 0.5
@@ -75,7 +75,7 @@ recoilSmooth = 8
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
 # Set to match your fire key to avoid recoil during grenades etc.
-recoilKey = 2
+recoilKey = 1
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
@@ -87,13 +87,19 @@ triggerToggleKey = 121
 # Weapon for rigid recoil ("关闭 (Off)" = disabled)
 rigidWeapon = "AK-47"
 # CS2 in-game sensitivity (MUST match your game setting for accurate recoil control)
-cs2Sensitivity = 1.08
+cs2Sensitivity = 1.05
 # Smoothness: steps=sub-moves per bullet (1=instant, 2~3=moderate, 5+=smooth)
 rigidSteps = 4
 # Delay between sub-steps in ms (recommended: 1step=100, 2steps=25, 5steps=4)
 rigidDelay1 = 100
 # Extra delay after all sub-steps in ms (usually 0)
 rigidDelay2 = 8
+
+# Anti-flash (自动背闪) settings
+# Delay in seconds to stay turned away (0.2~3.0, default 0.5)
+antiflashDelay = 0.5
+# Minimum confidence to trigger anti-flash (0.1~1.0, default 0.5)
+antiflashConf = 0.5
 
 # Triggerbot settings
 # Delay in ms before firing when crosshair is on target (0=instant, 50~150=natural)
@@ -109,7 +115,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\v11s416.onnx"
+selectedModel = "models\v11s256.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU

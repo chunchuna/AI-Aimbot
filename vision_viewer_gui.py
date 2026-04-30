@@ -541,6 +541,13 @@ class VisionViewerApp:
         cur_trig_hk = _read_config_hex("triggerToggleKey", 0x76)  # F7
         self.trigger_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(cur_trig_hk, "F7"))
 
+        # Anti-flash (自动背闪)
+        self.antiflash_enabled_var = tk.BooleanVar(value=False)
+        self.antiflash_delay_var = tk.DoubleVar(value=_read_config_value("antiflashDelay", 0.5, float))  # seconds
+        self.antiflash_conf_var = tk.DoubleVar(value=_read_config_value("antiflashConf", 0.5, float))  # min confidence
+        self._antiflash_active = False       # True while turned away
+        self._antiflash_cooldown_until = 0.0 # timestamp: ignore new flashes until this time
+
         # Profile system
         self.profile_var = tk.StringVar()
         last_prof = get_last_profile()
@@ -899,6 +906,30 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
+        # --- Anti-flash (自动背闪) ---
+        ttk.Label(right, text="── 自动背闪 (Anti-Flash) ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
+        ttk.Checkbutton(right, text="启用自动背闪", variable=self.antiflash_enabled_var).pack(anchor="w")
+        ttk.Label(right, text="检测到闪光弹时自动转身→等待→转回", font=("", 8)).pack(anchor="w")
+
+        # Anti-flash delay
+        f_af1 = ttk.Frame(right); f_af1.pack(fill="x", pady=2)
+        ttk.Label(f_af1, text="背身持续 (秒):").pack(side="left")
+        self.antiflash_delay_label = ttk.Label(f_af1, text=f"{self.antiflash_delay_var.get():.1f}")
+        self.antiflash_delay_label.pack(side="right")
+        tk.Scale(right, from_=0.2, to=3.0, orient="horizontal", variable=self.antiflash_delay_var,
+                 resolution=0.1, command=lambda v: self.antiflash_delay_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
+
+        # Anti-flash confidence threshold
+        f_af2 = ttk.Frame(right); f_af2.pack(fill="x", pady=2)
+        ttk.Label(f_af2, text="闪光置信度:").pack(side="left")
+        self.antiflash_conf_label = ttk.Label(f_af2, text=f"{self.antiflash_conf_var.get():.2f}")
+        self.antiflash_conf_label.pack(side="right")
+        tk.Scale(right, from_=0.1, to=1.0, orient="horizontal", variable=self.antiflash_conf_var,
+                 resolution=0.05, command=lambda v: self.antiflash_conf_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+        ttk.Label(right, text="需要模型类别含\"闪\"字, 使用CS2灵敏度计算转身", font=("", 8)).pack(anchor="w")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
         # --- Toggle Hotkeys & Audio ---
         ttk.Label(right, text="── 快捷开关 ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
 
@@ -1043,6 +1074,45 @@ class VisionViewerApp:
         inp.mi.dwExtraInfo = None
         ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
+    def _antiflash_execute(self, delay_sec):
+        """Anti-flash thread: turn 180°, wait, turn back. Runs in background thread."""
+        try:
+            self._antiflash_active = True
+            sens = self.cs2_sensitivity_var.get()
+            # CS2: mouse_counts = degrees / (sensitivity * 0.022)
+            turn_counts = int(180.0 / (sens * 0.022))
+            print(f"[ANTI-FLASH] Triggered! sens={sens:.2f} turn={turn_counts}px delay={delay_sec:.1f}s")
+
+            # Split the large move into chunks to avoid driver limits on single mouse_event
+            chunk = 500  # max pixels per single move call
+            remaining = turn_counts
+            while remaining > 0:
+                move = min(remaining, chunk)
+                self._send_input_move(move, 0)
+                remaining -= move
+                if remaining > 0:
+                    time.sleep(0.001)
+
+            # Wait while turned away
+            time.sleep(delay_sec)
+
+            # Turn back (negative direction, same magnitude)
+            remaining = turn_counts
+            while remaining > 0:
+                move = min(remaining, chunk)
+                self._send_input_move(-move, 0)
+                remaining -= move
+                if remaining > 0:
+                    time.sleep(0.001)
+
+            print(f"[ANTI-FLASH] Returned to original angle")
+        except Exception as e:
+            print(f"[ANTI-FLASH] Error: {e}")
+        finally:
+            self._antiflash_active = False
+            # Cooldown: don't trigger again for (delay + 1) seconds
+            self._antiflash_cooldown_until = time.perf_counter() + delay_sec + 1.0
+
     def _rigid_recoil_loop(self):
         """
         Dedicated rigid recoil thread — FullExternal-style with custom smoothness.
@@ -1161,6 +1231,10 @@ class VisionViewerApp:
             "voiceEnabled": self.voice_enabled_var.get(),
             "rigidRecoilEnabled": self.rigid_recoil_var.get(),
             "rigidAiCorrect": self.rigid_ai_correct_var.get(),
+            # Anti-flash
+            "antiflashEnabled": self.antiflash_enabled_var.get(),
+            "antiflashDelay": round(self.antiflash_delay_var.get(), 1),
+            "antiflashConf": round(self.antiflash_conf_var.get(), 2),
         }
 
     def _apply_config_vals(self, vals: dict):
@@ -1223,6 +1297,13 @@ class VisionViewerApp:
             self.rigid_delay2_var.set(int(vals["rigidDelay2"]))
         if "rigidAiCorrect" in vals:
             self.rigid_ai_correct_var.set(bool(vals["rigidAiCorrect"]))
+        # Anti-flash
+        if "antiflashEnabled" in vals:
+            self.antiflash_enabled_var.set(bool(vals["antiflashEnabled"]))
+        if "antiflashDelay" in vals:
+            self.antiflash_delay_var.set(float(vals["antiflashDelay"]))
+        if "antiflashConf" in vals:
+            self.antiflash_conf_var.set(float(vals["antiflashConf"]))
         # Toggle states
         if "aimEnabled" in vals:
             self.aim_enabled_var.set(bool(vals["aimEnabled"]))
@@ -1243,7 +1324,7 @@ class VisionViewerApp:
 
     # -------------------------------------------------------- config save
     # Profile-only keys (not written to config.py)
-    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled", "rigidAiCorrect"}
+    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled", "rigidAiCorrect", "antiflashEnabled"}
 
     def save_config(self):
         vals = self._gather_config_vals()
@@ -2022,6 +2103,22 @@ class VisionViewerApp:
                                      "mid_x": mid_x, "mid_y": mid_y,
                                      "box_h": box_h, "box_w": box_w, "area": area,
                                      "dist": dist, "xyxy": ibox})
+
+            # --- Anti-flash: check for flash class BEFORE class filter ---
+            if (self.antiflash_enabled_var.get() and not self._antiflash_active
+                    and time.perf_counter() > self._antiflash_cooldown_until
+                    and self._model_class_names):
+                af_conf = self.antiflash_conf_var.get()
+                # Find class IDs whose name contains "闪" (flash)
+                flash_cls_ids = {cid for cid, name in self._model_class_names.items() if "闪" in name}
+                if flash_cls_ids:
+                    for d in all_dets:
+                        if d["cls"] in flash_cls_ids and d["conf"] >= af_conf:
+                            # Flash detected! Launch anti-flash in background thread
+                            af_delay = self.antiflash_delay_var.get()
+                            threading.Thread(target=self._antiflash_execute,
+                                             args=(af_delay,), daemon=True).start()
+                            break
 
             # Apply class filter from GUI checkboxes (if user unchecked some classes)
             _enabled_cls = self._get_enabled_class_ids()
