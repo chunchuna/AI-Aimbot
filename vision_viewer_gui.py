@@ -73,45 +73,75 @@ class _INPUT(ctypes.Structure):
 
 _MOUSEEVENTF_MOVE = 0x0001
 
-# ---- Transparent fullscreen overlay using Win32 API ----
+# ---- Transparent fullscreen overlay using Win32 API + UpdateLayeredWindow ----
 class OverlayWindow:
-    """A transparent, click-through, always-on-top fullscreen window for drawing detection boxes."""
+    """A transparent, click-through, always-on-top fullscreen overlay.
 
-    WS_EX_LAYERED = 0x80000
-    WS_EX_TRANSPARENT = 0x20
-    WS_EX_TOPMOST = 0x8
-    WS_EX_TOOLWINDOW = 0x80
-    WS_POPUP = 0x80000000
-    GWL_EXSTYLE = -20
-    LWA_COLORKEY = 0x1
-    HWND_TOPMOST = -1
-    SWP_NOMOVE = 0x2
-    SWP_NOSIZE = 0x1
-    SWP_NOACTIVATE = 0x10
-    SW_SHOWNOACTIVATE = 4
+    Uses UpdateLayeredWindow with per-pixel alpha (32-bit BGRA DIB) so the
+    overlay is visible even over borderless-fullscreen games.  DWM composites
+    the layered window on top of everything when HWND_TOPMOST is set.
+    """
+
+    # Win32 constants
+    WS_EX_LAYERED     = 0x00080000
+    WS_EX_TRANSPARENT = 0x00000020
+    WS_EX_TOPMOST     = 0x00000008
+    WS_EX_TOOLWINDOW  = 0x00000080
+    WS_EX_NOACTIVATE  = 0x08000000
+    WS_POPUP           = 0x80000000
+    HWND_TOPMOST       = -1
+    SWP_NOMOVE         = 0x0002
+    SWP_NOSIZE         = 0x0001
+    SWP_NOACTIVATE     = 0x0010
+    SWP_SHOWWINDOW     = 0x0040
+    SW_SHOWNOACTIVATE  = 4
+    AC_SRC_OVER        = 0x00
+    AC_SRC_ALPHA       = 0x01
+    ULW_ALPHA          = 0x02
+    DIB_RGB_COLORS     = 0
+    BI_RGB             = 0
 
     _CLASS_REGISTERED = False
     _CLASS_NAME = "AimOverlayWnd"
 
     def __init__(self):
         self._hwnd = None
-        self._hdc = None
-        self._width = ctypes.windll.user32.GetSystemMetrics(0)
-        self._height = ctypes.windll.user32.GetSystemMetrics(1)
-        self._colorkey = 0x00010101  # BGR colorkey for transparency (near-black)
+        self._cached_dib = None
+        self._cached_mem_dc = None
+        self._cached_old_bmp = None
+        self._cached_arr = None
+        user32 = ctypes.windll.user32
+        # Use virtual screen metrics (multi-monitor aware)
+        self._left = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+        self._top = user32.GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
+        self._width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        self._height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
+        if self._width <= 0 or self._height <= 0:
+            # Fallback to primary monitor
+            self._left = 0
+            self._top = 0
+            self._width = user32.GetSystemMetrics(0)
+            self._height = user32.GetSystemMetrics(1)
+        self._topmost_counter = 0
         self._create_window()
+        self._create_dib_cache()
 
+    # ---- window creation ----
     def _create_window(self):
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
         hInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
 
-        if not OverlayWindow._CLASS_REGISTERED:
-            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
-                                         ctypes.c_void_p, ctypes.c_void_p)
-            self._wndproc_ref = WNDPROC(lambda hwnd, msg, wp, lp:
-                                        user32.DefWindowProcW(hwnd, msg, wp, lp))
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long,
+                                     ctypes.wintypes.HWND, ctypes.c_uint,
+                                     ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+        user32.DefWindowProcW.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint,
+                                          ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+        user32.DefWindowProcW.restype = ctypes.c_long
+        self._wndproc_ref = WNDPROC(lambda hwnd, msg, wp, lp:
+                                    user32.DefWindowProcW(hwnd, msg, wp, lp))
 
+        if not OverlayWindow._CLASS_REGISTERED:
             class WNDCLASSEXW(ctypes.Structure):
                 _fields_ = [("cbSize", ctypes.c_uint), ("style", ctypes.c_uint),
                             ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
@@ -125,95 +155,184 @@ class OverlayWindow:
             wc.lpfnWndProc = self._wndproc_ref
             wc.hInstance = hInstance
             wc.lpszClassName = self._CLASS_NAME
-            wc.hbrBackground = gdi32.CreateSolidBrush(self._colorkey)
+            wc.hbrBackground = 0
             user32.RegisterClassExW(ctypes.byref(wc))
             OverlayWindow._CLASS_REGISTERED = True
-        else:
-            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
-                                         ctypes.c_void_p, ctypes.c_void_p)
-            self._wndproc_ref = WNDPROC(lambda hwnd, msg, wp, lp:
-                                        user32.DefWindowProcW(hwnd, msg, wp, lp))
 
         ex_style = (self.WS_EX_LAYERED | self.WS_EX_TRANSPARENT |
-                    self.WS_EX_TOPMOST | self.WS_EX_TOOLWINDOW)
+                    self.WS_EX_TOPMOST | self.WS_EX_TOOLWINDOW | self.WS_EX_NOACTIVATE)
         self._hwnd = user32.CreateWindowExW(
             ex_style, self._CLASS_NAME, "AimOverlay",
-            self.WS_POPUP, 0, 0, self._width, self._height,
+            self.WS_POPUP,
+            self._left, self._top, self._width, self._height,
             None, None, hInstance, None)
 
-        # Set colorkey transparency
-        user32.SetLayeredWindowAttributes(self._hwnd, self._colorkey, 0, self.LWA_COLORKEY)
-        user32.ShowWindow(self._hwnd, self.SW_SHOWNOACTIVATE)
-
-    def draw(self, detections, capture_region=None):
-        """Draw detection boxes on the overlay.
-        detections: list of dicts with 'xyxy', 'conf', 'cls', optional '_role', '_color', '_label'
-        capture_region: (left, top, right, bottom) of the screen region that was captured"""
         if not self._hwnd:
+            print("[OVERLAY] CreateWindowExW failed!")
+            return
+
+        user32.ShowWindow(self._hwnd, self.SW_SHOWNOACTIVATE)
+        # Force topmost
+        user32.SetWindowPos(self._hwnd, self.HWND_TOPMOST,
+                            0, 0, 0, 0,
+                            self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE)
+        print(f"[OVERLAY] Created hwnd={self._hwnd} size={self._width}x{self._height} offset=({self._left},{self._top})")
+
+    # ---- pre-allocate DIB for reuse across frames ----
+    def _create_dib_cache(self):
+        """Create a persistent 32-bit BGRA DIB section for UpdateLayeredWindow."""
+        gdi32 = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+        screen_dc = user32.GetDC(0)
+        self._screen_dc = screen_dc
+        self._cached_mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", ctypes.c_uint), ("biWidth", ctypes.c_int),
+                        ("biHeight", ctypes.c_int), ("biPlanes", ctypes.c_ushort),
+                        ("biBitCount", ctypes.c_ushort), ("biCompression", ctypes.c_uint),
+                        ("biSizeImage", ctypes.c_uint), ("biXPelsPerMeter", ctypes.c_int),
+                        ("biYPelsPerMeter", ctypes.c_int), ("biClrUsed", ctypes.c_uint),
+                        ("biClrImportant", ctypes.c_uint)]
+
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth = self._width
+        bmi.biHeight = -self._height  # top-down DIB
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = self.BI_RGB
+
+        ppvBits = ctypes.c_void_p()
+        self._cached_dib = gdi32.CreateDIBSection(
+            self._cached_mem_dc, ctypes.byref(bmi), self.DIB_RGB_COLORS,
+            ctypes.byref(ppvBits), None, 0)
+
+        if not self._cached_dib or not ppvBits:
+            print("[OVERLAY] Failed to create DIB section!")
+            self._cached_arr = None
+            return
+
+        self._cached_old_bmp = gdi32.SelectObject(self._cached_mem_dc, self._cached_dib)
+        buf = (ctypes.c_uint8 * (self._width * self._height * 4)).from_address(ppvBits.value)
+        self._cached_arr = np.ctypeslib.as_array(buf).reshape((self._height, self._width, 4))
+
+        # Pre-build UpdateLayeredWindow structs (reused every frame)
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        class SIZE(ctypes.Structure):
+            _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+        class BLENDFUNCTION(ctypes.Structure):
+            _fields_ = [("BlendOp", ctypes.c_byte), ("BlendFlags", ctypes.c_byte),
+                        ("SourceConstantAlpha", ctypes.c_byte), ("AlphaFormat", ctypes.c_byte)]
+
+        self._pt_src = POINT(0, 0)
+        self._pt_dst = POINT(self._left, self._top)
+        self._sz = SIZE(self._width, self._height)
+        self._blend = BLENDFUNCTION(self.AC_SRC_OVER, 0, 255, self.AC_SRC_ALPHA)
+        print(f"[OVERLAY] DIB cache created: {self._width}x{self._height} BGRA")
+
+    # ---- per-pixel-alpha update via UpdateLayeredWindow ----
+    def draw(self, detections, capture_region=None):
+        """Draw detection boxes using UpdateLayeredWindow (per-pixel alpha).
+        detections: list of dicts with 'xyxy', optional '_color', '_label'
+        capture_region: (left, top, right, bottom) of the captured screen region"""
+        if not self._hwnd or self._cached_arr is None:
             return
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
+        arr = self._cached_arr
+        mem_dc = self._cached_mem_dc
 
-        hdc = user32.GetDC(self._hwnd)
-        # Create double-buffer
-        mem_dc = gdi32.CreateCompatibleDC(hdc)
-        bmp = gdi32.CreateCompatibleBitmap(hdc, self._width, self._height)
-        old_bmp = gdi32.SelectObject(mem_dc, bmp)
+        # Re-assert TOPMOST periodically (every ~30 draw calls ≈ once per second)
+        self._topmost_counter += 1
+        if self._topmost_counter >= 30:
+            self._topmost_counter = 0
+            user32.SetWindowPos(self._hwnd, self.HWND_TOPMOST,
+                                0, 0, 0, 0,
+                                self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE)
 
-        # Fill with colorkey (transparent)
-        brush = gdi32.CreateSolidBrush(self._colorkey)
-        rect = ctypes.wintypes.RECT(0, 0, self._width, self._height)
-        user32.FillRect(mem_dc, ctypes.byref(rect), brush)
-        gdi32.DeleteObject(brush)
+        # Clear to fully transparent (BGRA 0,0,0,0)
+        arr[:] = 0
 
-        # Capture region offset
+        # Capture region offset (detection coords are relative to capture region)
         ox, oy = 0, 0
         if capture_region:
-            ox, oy = capture_region[0], capture_region[1]
+            ox, oy = capture_region[0] - self._left, capture_region[1] - self._top
+
+        line_thickness = 2
 
         for d in detections:
             x1, y1, x2, y2 = d["xyxy"]
-            # Offset to screen coordinates
-            sx1, sy1, sx2, sy2 = x1 + ox, y1 + oy, x2 + ox, y2 + oy
-            color_bgr = d.get("_color", (0, 0, 255))  # default red
-            # GDI uses COLORREF = 0x00BBGGRR
-            cr = (color_bgr[2]) | (color_bgr[1] << 8) | (color_bgr[0] << 16)
+            sx1 = max(0, int(x1 + ox))
+            sy1 = max(0, int(y1 + oy))
+            sx2 = min(self._width - 1, int(x2 + ox))
+            sy2 = min(self._height - 1, int(y2 + oy))
+            if sx1 >= sx2 or sy1 >= sy2:
+                continue
+            color_bgr = d.get("_color", (0, 0, 255))  # BGR tuple
+            b, g, r = int(color_bgr[0]), int(color_bgr[1]), int(color_bgr[2])
+            a = 255  # fully opaque
 
-            pen = gdi32.CreatePen(0, 2, cr)  # PS_SOLID=0, width=2
-            old_pen = gdi32.SelectObject(mem_dc, pen)
-            null_brush = gdi32.GetStockObject(5)  # NULL_BRUSH
-            old_br = gdi32.SelectObject(mem_dc, null_brush)
-            gdi32.Rectangle(mem_dc, sx1, sy1, sx2, sy2)
-            gdi32.SelectObject(mem_dc, old_pen)
-            gdi32.SelectObject(mem_dc, old_br)
-            gdi32.DeleteObject(pen)
+            # Draw rectangle edges directly into the pixel buffer (fast)
+            t = line_thickness
+            # Top edge
+            arr[sy1:min(sy1+t, sy2), sx1:sx2] = [b, g, r, a]
+            # Bottom edge
+            arr[max(sy1, sy2-t):sy2, sx1:sx2] = [b, g, r, a]
+            # Left edge
+            arr[sy1:sy2, sx1:min(sx1+t, sx2)] = [b, g, r, a]
+            # Right edge
+            arr[sy1:sy2, max(sx1, sx2-t):sx2] = [b, g, r, a]
 
-            # Draw label text
+            # Draw label text using GDI on mem_dc (supports Unicode)
             label = d.get("_label", "")
             if label:
+                cr = r | (g << 8) | (b << 16)
                 gdi32.SetTextColor(mem_dc, cr)
-                gdi32.SetBkMode(mem_dc, 1)  # TRANSPARENT
+                gdi32.SetBkMode(mem_dc, 1)  # TRANSPARENT background
                 txt = ctypes.create_unicode_buffer(label)
-                r = ctypes.wintypes.RECT(sx1, max(0, sy1 - 18), sx2 + 80, sy1)
-                user32.DrawTextW(mem_dc, txt, -1, ctypes.byref(r), 0)
+                lbl_y = max(0, sy1 - 16)
+                rc = ctypes.wintypes.RECT(sx1, lbl_y, sx2 + 100, sy1)
+                user32.DrawTextW(mem_dc, txt, -1, ctypes.byref(rc), 0)
+                # DrawTextW writes RGB but leaves alpha=0 → fix alpha for text pixels
+                lbl_h = min(16, sy1 - lbl_y) if sy1 > lbl_y else 0
+                if lbl_h > 0:
+                    text_region = arr[lbl_y:lbl_y + lbl_h, sx1:min(sx2 + 100, self._width)]
+                    mask = (text_region[:, :, 0].astype(np.uint16) +
+                            text_region[:, :, 1].astype(np.uint16) +
+                            text_region[:, :, 2].astype(np.uint16)) > 0
+                    text_region[:, :, 3] = np.where(mask, 255, text_region[:, :, 3])
 
-        # Blit to window
-        gdi32.BitBlt(hdc, 0, 0, self._width, self._height, mem_dc, 0, 0, 0x00CC0020)
-
-        # Cleanup
-        gdi32.SelectObject(mem_dc, old_bmp)
-        gdi32.DeleteObject(bmp)
-        gdi32.DeleteDC(mem_dc)
-        user32.ReleaseDC(self._hwnd, hdc)
+        # Commit to screen via UpdateLayeredWindow
+        user32.UpdateLayeredWindow(self._hwnd, self._screen_dc,
+                                   ctypes.byref(self._pt_dst), ctypes.byref(self._sz),
+                                   mem_dc, ctypes.byref(self._pt_src),
+                                   0, ctypes.byref(self._blend), self.ULW_ALPHA)
 
     def clear(self):
-        """Clear overlay (draw nothing)."""
+        """Clear overlay (draw transparent frame)."""
         self.draw([])
 
     def destroy(self):
-        """Destroy the overlay window."""
+        """Destroy the overlay window and free cached GDI resources."""
+        gdi32 = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+        if self._cached_mem_dc:
+            if self._cached_old_bmp:
+                gdi32.SelectObject(self._cached_mem_dc, self._cached_old_bmp)
+            if self._cached_dib:
+                gdi32.DeleteObject(self._cached_dib)
+            gdi32.DeleteDC(self._cached_mem_dc)
+            self._cached_mem_dc = None
+            self._cached_dib = None
+            self._cached_old_bmp = None
+            self._cached_arr = None
+        if hasattr(self, '_screen_dc') and self._screen_dc:
+            user32.ReleaseDC(0, self._screen_dc)
+            self._screen_dc = None
         if self._hwnd:
-            ctypes.windll.user32.DestroyWindow(self._hwnd)
+            user32.DestroyWindow(self._hwnd)
             self._hwnd = None
 
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
@@ -617,11 +736,11 @@ class VisionViewerApp:
 
         top_frame = ttk.Frame(left, padding=8)
         top_frame.pack(fill=tk.X)
-        ttk.Label(top_frame, text="选择目标窗口:").pack(side=tk.LEFT)
+        ttk.Button(top_frame, text="▶ 全屏启动", command=self.start_viewer_fullscreen).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(top_frame, text="停止", command=self.stop_viewer).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(top_frame, text="或选择窗口:").pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(top_frame, text="刷新", command=self.refresh_windows).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(top_frame, text="启动", command=self.start_viewer).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(top_frame, text="鼠标模式", command=self.start_viewer_mouse_mode).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(top_frame, text="停止", command=self.stop_viewer).pack(side=tk.RIGHT)
+        ttk.Button(top_frame, text="窗口启动", command=self.start_viewer).pack(side=tk.RIGHT, padx=4)
 
         columns = ("index", "title", "process", "pid", "size")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="browse")
@@ -1887,6 +2006,39 @@ class VisionViewerApp:
             return
         self.running = True
         self.status_var.set("运行中 (窗口模式) | 按 Q 关闭预览窗口")
+        self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
+        self.worker.start()
+
+    def start_viewer_fullscreen(self):
+        """Start capture centered on screen center — no window selection needed."""
+        if self.running:
+            return
+        if bettercam is None:
+            messagebox.showerror("缺少依赖", "bettercam 未安装。\npip install bettercam")
+            return
+        user32 = ctypes.windll.user32
+        sw = user32.GetSystemMetrics(0)
+        sh = user32.GetSystemMetrics(1)
+        center_x = sw // 2
+        center_y = sh // 2
+        left = max(0, center_x - screenShotWidth // 2)
+        top = max(0, center_y - screenShotHeight // 2)
+        region = (left, top, left + screenShotWidth, top + screenShotHeight)
+        print(f"[CAPTURE] Fullscreen center mode: screen={sw}x{sh} region={region}")
+        self._mouse_mode = False
+        self._capture_region = region
+        try:
+            if not self.color_mode_var.get() and self.model is None:
+                self.load_model()
+            self.camera = bettercam.create(region=region, output_color="BGRA")
+            if self.camera is None:
+                raise RuntimeError("摄像头创建失败")
+        except Exception as exc:
+            self.status_var.set("启动失败")
+            messagebox.showerror("启动失败", str(exc))
+            return
+        self.running = True
+        self.status_var.set("运行中 (全屏模式) | 按 Q 关闭预览窗口")
         self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
         self.worker.start()
 

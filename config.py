@@ -9,10 +9,10 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 1.05
+aaMovementAmp = 0.6
 
 # Person Class Confidence
-confidence = 0.3
+confidence = 0.1
 
 # What key to press to quit and shutdown the autoaim
 aaQuitKey = "Q"
@@ -54,20 +54,20 @@ aaSmoothFactor = 1.0
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 63
+aaFOV = 137
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -9
+crosshairYOffset = 11
 
 # Screen capture FPS (30-500)
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "AK-47"
+recoilWeapon = "关闭 (Off)"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 0.5
+recoilStrength = 1.0
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
 recoilSmooth = 8
@@ -79,15 +79,15 @@ recoilKey = 1
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
-aimToggleKey = 118
-recoilToggleKey = 122
-triggerToggleKey = 121
+aimToggleKey = 117
+recoilToggleKey = 36
+triggerToggleKey = 123
 
 # Rigid recoil mode (FullExternal-style dedicated thread)
 # Weapon for rigid recoil ("关闭 (Off)" = disabled)
 rigidWeapon = "AK-47"
 # CS2 in-game sensitivity (MUST match your game setting for accurate recoil control)
-cs2Sensitivity = 1.05
+cs2Sensitivity = 1.08
 # Smoothness: steps=sub-moves per bullet (1=instant, 2~3=moderate, 5+=smooth)
 rigidSteps = 4
 # Delay between sub-steps in ms (recommended: 1step=100, 2steps=25, 5steps=4)
@@ -109,8 +109,8 @@ colorVLow = 150
 colorHHigh = 40
 colorSHigh = 255
 colorVHigh = 255
-colorSmooth = 0.55
-colorMinArea = 300
+colorSmooth = 0.05
+colorMinArea = 5
 
 # Triggerbot settings
 # Delay in ms before firing when crosshair is on target (0=instant, 50~150=natural)
@@ -126,7 +126,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\v11s256.onnx"
+selectedModel = "models\416-vx-0警1头2匪3头.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU
