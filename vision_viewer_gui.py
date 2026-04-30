@@ -218,8 +218,7 @@ class OverlayWindow:
 
 from config import confidence as _conf_default, screenShotHeight, screenShotWidth
 from recoil_patterns import (WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size,
-                              RIGID_WEAPON_NAMES, RIGID_SMOOTHNESS_NAMES,
-                              get_rigid_weapon_data, get_rigid_delays)
+                              RIGID_WEAPON_NAMES, get_rigid_weapon_data)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
@@ -512,8 +511,13 @@ class VisionViewerApp:
         # ---- Rigid recoil mode (FullExternal-style dedicated thread) ----
         self.rigid_recoil_var = tk.BooleanVar(value=False)  # checkbox to enable rigid mode
         self.rigid_weapon_var = tk.StringVar(value=_read_config_value("rigidWeapon", "关闭 (Off)", str))
-        self.rigid_smoothness_var = tk.StringVar(value=_read_config_value("rigidSmoothness", "rigid", str))
         self.cs2_sensitivity_var = tk.DoubleVar(value=_read_config_value("cs2Sensitivity", 2.5, float))
+        # Custom smoothness: steps (sub-moves per bullet) and delays (microseconds)
+        self.rigid_steps_var = tk.IntVar(value=_read_config_value("rigidSteps", 1, int))
+        self.rigid_delay1_var = tk.IntVar(value=_read_config_value("rigidDelay1", 100, int))  # ms between sub-steps
+        self.rigid_delay2_var = tk.IntVar(value=_read_config_value("rigidDelay2", 0, int))    # ms after all sub-steps
+        # AI dual-axis correction during spray
+        self.rigid_ai_correct_var = tk.BooleanVar(value=False)
         # Rigid recoil thread control
         self._rigid_recoil_running = False
         self._rigid_recoil_thread = None
@@ -565,6 +569,10 @@ class VisionViewerApp:
         self._model_input_dtype = np.float16  # updated when model loads
         self._model_input_name = "images"     # updated when model loads
         self._model_output_format = "v5"      # "v5" or "v8" — updated when model loads
+        # Class filter: {cls_id: name} from model metadata, and BooleanVars per class
+        self._model_class_names = {}          # {0: "CT", 1: "T", ...} from metadata
+        self._class_filter_vars = {}          # {cls_id: tk.BooleanVar} — True = enabled
+        self._class_filter_frame = None       # ttk.Frame holding checkboxes, rebuilt on model load
 
         self._build_ui()
         self.refresh_windows()
@@ -658,6 +666,11 @@ class VisionViewerApp:
         ttk.Button(btn_frame, text="刷新模型列表", command=self._refresh_models).pack(side="left")
         self.model_status_label = ttk.Label(right, text="", foreground="gray")
         self.model_status_label.pack(anchor="w")
+
+        # --- Class filter (dynamic checkboxes, rebuilt when model loads) ---
+        self._class_filter_frame = ttk.LabelFrame(right, text="识别类别筛选")
+        self._class_filter_frame.pack(fill="x", pady=(2, 0))
+        ttk.Label(self._class_filter_frame, text="(加载模型后自动显示)", foreground="gray").pack(anchor="w")
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
@@ -829,13 +842,6 @@ class VisionViewerApp:
         ttk.Combobox(f_rg1, textvariable=self.rigid_weapon_var,
                      values=RIGID_WEAPON_NAMES, state="readonly", width=16).pack(side="right", fill="x", expand=True)
 
-        # Rigid smoothness selector
-        f_rg2 = ttk.Frame(right); f_rg2.pack(fill="x", pady=2)
-        ttk.Label(f_rg2, text="平滑模式:").pack(side="left")
-        ttk.Combobox(f_rg2, textvariable=self.rigid_smoothness_var,
-                     values=RIGID_SMOOTHNESS_NAMES, state="readonly", width=16).pack(side="right")
-        ttk.Label(right, text="rigid=最精准(机器) semiRigid=适中 soft=最自然", font=("", 8)).pack(anchor="w")
-
         # CS2 sensitivity
         f_rg3 = ttk.Frame(right); f_rg3.pack(fill="x", pady=2)
         ttk.Label(f_rg3, text="CS2灵敏度:").pack(side="left")
@@ -844,6 +850,38 @@ class VisionViewerApp:
         tk.Scale(right, from_=0.1, to=10.0, orient="horizontal", variable=self.cs2_sensitivity_var,
                  resolution=0.01, command=lambda v: self.cs2_sens_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
         ttk.Label(right, text="必须和游戏内灵敏度一致! 默认2.50", font=("", 8)).pack(anchor="w")
+
+        # Custom smoothness: steps
+        f_rg_steps = ttk.Frame(right); f_rg_steps.pack(fill="x", pady=2)
+        ttk.Label(f_rg_steps, text="分步数 (Steps):").pack(side="left")
+        self.rigid_steps_label = ttk.Label(f_rg_steps, text=str(self.rigid_steps_var.get()))
+        self.rigid_steps_label.pack(side="right")
+        tk.Scale(right, from_=1, to=10, orient="horizontal", variable=self.rigid_steps_var,
+                 resolution=1, command=lambda v: self.rigid_steps_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="1=一次到位(最精准) 2~3=适中 5+=很柔和", font=("", 8)).pack(anchor="w")
+
+        # Custom smoothness: delay between sub-steps (ms)
+        f_rg_d1 = ttk.Frame(right); f_rg_d1.pack(fill="x", pady=2)
+        ttk.Label(f_rg_d1, text="步间延迟 (ms):").pack(side="left")
+        self.rigid_d1_label = ttk.Label(f_rg_d1, text=str(self.rigid_delay1_var.get()))
+        self.rigid_d1_label.pack(side="right")
+        tk.Scale(right, from_=1, to=200, orient="horizontal", variable=self.rigid_delay1_var,
+                 resolution=1, command=lambda v: self.rigid_d1_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="每个分步之间的间隔 推荐: 1步=100ms, 2步=25ms, 5步=4ms", font=("", 8)).pack(anchor="w")
+
+        # Custom smoothness: delay after bullet (ms)
+        f_rg_d2 = ttk.Frame(right); f_rg_d2.pack(fill="x", pady=2)
+        ttk.Label(f_rg_d2, text="弹后延迟 (ms):").pack(side="left")
+        self.rigid_d2_label = ttk.Label(f_rg_d2, text=str(self.rigid_delay2_var.get()))
+        self.rigid_d2_label.pack(side="right")
+        tk.Scale(right, from_=0, to=100, orient="horizontal", variable=self.rigid_delay2_var,
+                 resolution=1, command=lambda v: self.rigid_d2_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="所有分步完成后的额外等待 通常0即可", font=("", 8)).pack(anchor="w")
+
+        # AI dual-axis correction
+        ttk.Checkbutton(right, text="AI双轴修正 (喷射中自瞄X+Y追踪目标)",
+                         variable=self.rigid_ai_correct_var).pack(anchor="w", pady=2)
+        ttk.Label(right, text="弹道表对抗后坐力 + AI实时修正目标偏差", font=("", 8)).pack(anchor="w")
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
@@ -1007,14 +1045,14 @@ class VisionViewerApp:
 
     def _rigid_recoil_loop(self):
         """
-        Dedicated rigid recoil thread — exact port of FullExternal-CS2-No-Recoil MainThread.
-        Runs independently from the AI inference loop at microsecond-level timing.
+        Dedicated rigid recoil thread — FullExternal-style with custom smoothness.
         Uses SendInput for lowest latency mouse moves.
+        Fixes integer truncation by accumulating float remainders.
         """
-        count = 0  # current bullet index (1-based in the loop, 0 = idle)
+        count = 0  # current bullet index (0 = idle, 1..size-1 = active)
 
         while self._rigid_recoil_running:
-            # Check if rigid recoil is enabled and weapon is selected
+            # Check if rigid recoil is enabled
             if not self.recoil_enabled_var.get():
                 self._rigid_spray_active = False
                 time.sleep(0.05)
@@ -1027,14 +1065,17 @@ class VisionViewerApp:
                 continue
 
             sens = self.cs2_sensitivity_var.get()
-            smoothness_name = self.rigid_smoothness_var.get()
             X, Y, size = get_rigid_weapon_data(weapon, sens)
-            steps, delays = get_rigid_delays(weapon, smoothness_name)
 
             if X is None or size == 0:
                 self._rigid_spray_active = False
                 time.sleep(0.05)
                 continue
+
+            # Read smoothness params from GUI (live)
+            steps = max(self.rigid_steps_var.get(), 1)
+            delay1_ms = max(self.rigid_delay1_var.get(), 1)  # ms between sub-steps
+            delay2_ms = max(self.rigid_delay2_var.get(), 0)  # ms after all sub-steps
 
             # Read recoil trigger key
             rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
@@ -1047,27 +1088,39 @@ class VisionViewerApp:
                 time.sleep(0.001)
                 continue
 
-            # Trigger key IS held
-            # Check if we've reached end of magazine
+            # Trigger key IS held — check magazine end
             if count >= size - 1:
                 count = 0
                 self._rigid_spray_active = False
-                time.sleep(0.5)  # wait for magazine reload
+                time.sleep(0.5)
                 continue
 
-            # Advance to next bullet and apply compensation
+            # Advance to next bullet
             count += 1
             self._rigid_spray_active = True
 
-            # SmoothMovementMove: split this bullet's compensation into sub-steps
-            for i in range(steps):
-                time.sleep(delays[0] / 1_000_000.0)  # microseconds → seconds
-                move_x = int(X[count] / steps)
-                move_y = int(Y[count] / steps)
-                self._send_input_move(move_x, move_y)
+            # --- Sub-step movement with float accumulation (fixes truncation) ---
+            # Total float movement for this bullet
+            total_fx = X[count]
+            total_fy = Y[count]
+            accum_x = 0.0
+            accum_y = 0.0
 
-            if delays[1] > 0:
-                time.sleep(delays[1] / 1_000_000.0)
+            for i in range(steps):
+                time.sleep(delay1_ms / 1000.0)
+                # Calculate ideal accumulated movement after this sub-step
+                ideal_x = total_fx * (i + 1) / steps
+                ideal_y = total_fy * (i + 1) / steps
+                # Integer delta = ideal - already sent
+                dx = round(ideal_x - accum_x)
+                dy = round(ideal_y - accum_y)
+                if dx != 0 or dy != 0:
+                    self._send_input_move(dx, dy)
+                accum_x += dx
+                accum_y += dy
+
+            if delay2_ms > 0:
+                time.sleep(delay2_ms / 1000.0)
 
         self._rigid_spray_active = False
 
@@ -1097,14 +1150,17 @@ class VisionViewerApp:
             "selectedModel": self.model_var.get(),
             # Rigid recoil
             "rigidWeapon": self.rigid_weapon_var.get(),
-            "rigidSmoothness": self.rigid_smoothness_var.get(),
             "cs2Sensitivity": round(self.cs2_sensitivity_var.get(), 2),
+            "rigidSteps": self.rigid_steps_var.get(),
+            "rigidDelay1": self.rigid_delay1_var.get(),
+            "rigidDelay2": self.rigid_delay2_var.get(),
             # Toggle states (profile-only, not written to config.py)
             "aimEnabled": self.aim_enabled_var.get(),
             "recoilEnabled": self.recoil_enabled_var.get(),
             "triggerEnabled": self.trigger_enabled_var.get(),
             "voiceEnabled": self.voice_enabled_var.get(),
             "rigidRecoilEnabled": self.rigid_recoil_var.get(),
+            "rigidAiCorrect": self.rigid_ai_correct_var.get(),
         }
 
     def _apply_config_vals(self, vals: dict):
@@ -1157,10 +1213,16 @@ class VisionViewerApp:
         # Rigid recoil
         if "rigidWeapon" in vals:
             self.rigid_weapon_var.set(vals["rigidWeapon"])
-        if "rigidSmoothness" in vals:
-            self.rigid_smoothness_var.set(vals["rigidSmoothness"])
         if "cs2Sensitivity" in vals:
             self.cs2_sensitivity_var.set(float(vals["cs2Sensitivity"]))
+        if "rigidSteps" in vals:
+            self.rigid_steps_var.set(int(vals["rigidSteps"]))
+        if "rigidDelay1" in vals:
+            self.rigid_delay1_var.set(int(vals["rigidDelay1"]))
+        if "rigidDelay2" in vals:
+            self.rigid_delay2_var.set(int(vals["rigidDelay2"]))
+        if "rigidAiCorrect" in vals:
+            self.rigid_ai_correct_var.set(bool(vals["rigidAiCorrect"]))
         # Toggle states
         if "aimEnabled" in vals:
             self.aim_enabled_var.set(bool(vals["aimEnabled"]))
@@ -1181,7 +1243,7 @@ class VisionViewerApp:
 
     # -------------------------------------------------------- config save
     # Profile-only keys (not written to config.py)
-    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled"}
+    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled", "rigidAiCorrect"}
 
     def save_config(self):
         vals = self._gather_config_vals()
@@ -1336,6 +1398,58 @@ class VisionViewerApp:
         name = self.model_var.get()
         return self.available_models.get(name, "")
 
+    def _read_model_class_names(self, session):
+        """Read class names from ONNX model metadata. Returns dict {id: name} or empty."""
+        try:
+            import ast as _ast
+            meta = session.get_modelmeta().custom_metadata_map
+            if 'names' in meta:
+                cls_names = _ast.literal_eval(meta['names'])
+                if isinstance(cls_names, dict):
+                    # Ensure keys are int
+                    return {int(k): str(v) for k, v in cls_names.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _update_class_filter_ui(self, class_names):
+        """Rebuild the class filter checkboxes from class_names dict {id: name}.
+        Called on the main thread after a model is loaded."""
+        self._model_class_names = class_names
+        # Clear old checkboxes
+        for w in self._class_filter_frame.winfo_children():
+            w.destroy()
+        self._class_filter_vars = {}
+
+        if not class_names:
+            ttk.Label(self._class_filter_frame, text="(模型无类别元数据)", foreground="gray").pack(anchor="w")
+            return
+
+        # Build checkboxes vertically (one per row)
+        for cls_id in sorted(class_names.keys()):
+            name = class_names[cls_id]
+            var = tk.BooleanVar(value=True)
+            self._class_filter_vars[cls_id] = var
+            ttk.Checkbutton(self._class_filter_frame, text=f"{cls_id}: {name}",
+                            variable=var).pack(anchor="w", padx=4)
+
+        # Select All / Deselect All buttons
+        btn_row = ttk.Frame(self._class_filter_frame)
+        btn_row.pack(fill="x", padx=2, pady=(2, 2))
+        ttk.Button(btn_row, text="全选", width=6,
+                   command=lambda: [v.set(True) for v in self._class_filter_vars.values()]).pack(side="left", padx=(0, 4))
+        ttk.Button(btn_row, text="全不选", width=6,
+                   command=lambda: [v.set(False) for v in self._class_filter_vars.values()]).pack(side="left")
+
+    def _get_enabled_class_ids(self):
+        """Return set of enabled class IDs, or None if no filter (all enabled or no metadata)."""
+        if not self._class_filter_vars:
+            return None  # No metadata = accept all
+        enabled = {cid for cid, var in self._class_filter_vars.items() if var.get()}
+        if len(enabled) == len(self._class_filter_vars):
+            return None  # All enabled = no filter needed
+        return enabled
+
     def _refresh_models(self):
         self.available_models = scan_onnx_models()
         names = list(self.available_models.keys())
@@ -1353,25 +1467,20 @@ class VisionViewerApp:
             self.model_status_label.configure(text="正在加载...", foreground="orange")
             self.root.update_idletasks()
             new_model = self._create_onnx_session(path)
-            # Read model expected input size
+            # Read model expected input size (handle dynamic axes from YOLOv11)
             inp = new_model.get_inputs()[0]
-            shape = inp.shape  # e.g. [1, 3, 640, 640]
-            model_h = int(shape[2]) if len(shape) >= 4 else 320
-            model_w = int(shape[3]) if len(shape) >= 4 else 320
+            shape = inp.shape  # e.g. [1, 3, 640, 640] or ['batch', 3, 'height', 'width']
+            model_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) else screenShotHeight
+            model_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) else screenShotWidth
             model_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
+            # Read class names from model metadata and update filter UI
+            cls_names = self._read_model_class_names(new_model)
+            if cls_names:
+                print(f"[MODEL] Metadata class names: {cls_names}")
+            self._update_class_filter_ui(cls_names)
             # Detect output format: yolox / v8 / v5
-            out_shape = new_model.get_outputs()[0].shape
-            out_fmt = "v5"
-            if len(out_shape) == 3 and out_shape[1] is not None and out_shape[2] is not None:
-                dim1, dim2 = int(out_shape[1]), int(out_shape[2])
-                yolox_strides = [8, 16, 32]
-                yolox_expected = sum((model_h // s) * (model_w // s) for s in yolox_strides)
-                if dim1 == yolox_expected and dim2 < dim1:
-                    out_fmt = "yolox"
-                elif dim1 < dim2:
-                    out_fmt = "v8"
-                else:
-                    out_fmt = "v5"
+            # Uses dummy inference probe for models with dynamic output shapes (e.g. YOLOv11)
+            out_fmt, _, _ = self._detect_output_format(new_model, model_h, model_w, inp.name, model_dtype)
             with self._model_lock:
                 self.model = new_model
                 self._model_input_size = (model_w, model_h)
@@ -1380,6 +1489,7 @@ class VisionViewerApp:
                 self._model_output_format = out_fmt
                 self._model_skip_normalize = self._check_skip_normalize(path, out_fmt)
                 if out_fmt == "yolox":
+                    yolox_strides = [8, 16, 32]
                     # Pre-build YOLOX decode grids
                     grid_x_list, grid_y_list, stride_list = [], [], []
                     for s in yolox_strides:
@@ -1391,9 +1501,8 @@ class VisionViewerApp:
                     self._yolox_grid_x = np.concatenate(grid_x_list).astype(np.float32)
                     self._yolox_grid_y = np.concatenate(grid_y_list).astype(np.float32)
                     self._yolox_stride = np.concatenate(stride_list).astype(np.float32)
-                    print(f"[MODEL] YOLOX detected: {yolox_expected} anchors, strides={yolox_strides}")
             self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {out_fmt})", foreground="green")
-            print(f"[MODEL] Switched to: {path}  input={inp.name} {model_w}x{model_h} dtype={inp.type} format={out_fmt} out_shape={out_shape}")
+            print(f"[MODEL] Switched to: {path}  input={inp.name} {model_w}x{model_h} dtype={inp.type} format={out_fmt}")
         except Exception as e:
             self.model_status_label.configure(text=f"加载失败!", foreground="red")
             messagebox.showerror("模型加载失败", str(e))
@@ -1409,6 +1518,61 @@ class VisionViewerApp:
             print(f"[MODEL] 77-series model detected, using raw 0-255 input")
             return True
         return False
+
+    @staticmethod
+    def _detect_output_format(session, model_h, model_w, input_name, model_dtype):
+        """Detect ONNX model output format by inspecting output shape.
+        If the output shape has dynamic (None/str) dimensions, runs a dummy inference
+        to get the actual tensor shape. This is critical for YOLOv11 models which
+        are often exported with dynamic axes.
+
+        Returns: ("v5" | "v8" | "yolox", dim1, dim2) where dim1/dim2 are the actual
+        output dimensions (excluding batch).
+        """
+        out_meta = session.get_outputs()[0].shape
+        print(f"[MODEL] Output metadata shape: {out_meta}")
+
+        dim1, dim2 = None, None
+
+        # Try to read from metadata first
+        if len(out_meta) == 3:
+            d1, d2 = out_meta[1], out_meta[2]
+            if isinstance(d1, int) and isinstance(d2, int):
+                dim1, dim2 = d1, d2
+
+        # If dimensions are dynamic (None or str), probe with dummy inference
+        if dim1 is None or dim2 is None:
+            print(f"[MODEL] Dynamic output shape detected, probing with dummy inference...")
+            try:
+                dummy = np.zeros((1, 3, model_h, model_w), dtype=model_dtype)
+                dummy_out = session.run(None, {input_name: dummy})[0]
+                actual_shape = dummy_out.shape
+                print(f"[MODEL] Probed actual output shape: {actual_shape}")
+                if len(actual_shape) == 3:
+                    dim1, dim2 = actual_shape[1], actual_shape[2]
+                elif len(actual_shape) == 2:
+                    # Some models squeeze the batch dim
+                    dim1, dim2 = actual_shape[0], actual_shape[1]
+            except Exception as e:
+                print(f"[MODEL] Dummy inference failed: {e}")
+
+        if dim1 is None or dim2 is None:
+            print(f"[MODEL] Could not determine output dims, defaulting to v5")
+            return "v5", 0, 0
+
+        # Detect format
+        yolox_strides = [8, 16, 32]
+        yolox_expected = sum((model_h // s) * (model_w // s) for s in yolox_strides)
+        print(f"[MODEL] dim1={dim1} dim2={dim2} yolox_expected={yolox_expected}")
+
+        if dim1 == yolox_expected and dim2 < dim1:
+            return "yolox", dim1, dim2
+        elif dim1 < dim2:
+            # v8/v11 format: [1, 4+nc, num_anchors] where 4+nc < num_anchors
+            return "v8", dim1, dim2
+        else:
+            # v5 format: [1, num_anchors, 5+nc] where num_anchors > 5+nc
+            return "v5", dim1, dim2
 
     def _create_onnx_session(self, model_path):
         if ort is None:
@@ -1436,44 +1600,34 @@ class VisionViewerApp:
         self.status_var.set("正在加载模型...")
         self.root.update_idletasks()
         self.model = self._create_onnx_session(path)
-        # Read model expected input size
+        # Read model expected input size (handle dynamic axes from YOLOv11)
         inp = self.model.get_inputs()[0]
-        shape = inp.shape
-        model_h = int(shape[2]) if len(shape) >= 4 else 320
-        model_w = int(shape[3]) if len(shape) >= 4 else 320
+        shape = inp.shape  # e.g. [1, 3, 640, 640] or ['batch', 3, 'height', 'width']
+        model_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) else screenShotHeight
+        model_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) else screenShotWidth
         self._model_input_size = (model_w, model_h)
         self._model_input_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
         self._model_input_name = inp.name
-        out_shape = self.model.get_outputs()[0].shape
-        print(f"[MODEL] out_shape={out_shape} len={len(out_shape)} types={[type(x).__name__ for x in out_shape]}")
-        if len(out_shape) == 3 and out_shape[1] is not None and out_shape[2] is not None:
-            dim1, dim2 = int(out_shape[1]), int(out_shape[2])
-            # Check for YOLOX: anchor-free, 1 anchor per grid cell
-            # Expected anchors = sum((input_size/stride)^2) for strides [8,16,32]
+        # Read class names from model metadata and update filter UI
+        cls_names = self._read_model_class_names(self.model)
+        if cls_names:
+            print(f"[MODEL] Metadata class names: {cls_names}")
+        self._update_class_filter_ui(cls_names)
+        # Detect output format using unified helper (handles dynamic shapes from YOLOv11)
+        out_fmt, _, _ = self._detect_output_format(self.model, model_h, model_w, inp.name, self._model_input_dtype)
+        self._model_output_format = out_fmt
+        if out_fmt == "yolox":
             yolox_strides = [8, 16, 32]
-            yolox_expected = sum((model_h // s) * (model_w // s) for s in yolox_strides)
-            print(f"[MODEL] dim1={dim1} dim2={dim2} yolox_expected={yolox_expected} match={dim1 == yolox_expected}")
-            if dim1 == yolox_expected and dim2 < dim1:
-                # YOLOX format: [1, N_anchors, 5+nc] with raw bbox needing grid decode
-                self._model_output_format = "yolox"
-                # Pre-build decode grids
-                grid_x_list, grid_y_list, stride_list = [], [], []
-                for s in yolox_strides:
-                    gs_h, gs_w = model_h // s, model_w // s
-                    yv, xv = np.meshgrid(np.arange(gs_h), np.arange(gs_w), indexing='ij')
-                    grid_x_list.append(xv.flatten())
-                    grid_y_list.append(yv.flatten())
-                    stride_list.append(np.full(gs_h * gs_w, s))
-                self._yolox_grid_x = np.concatenate(grid_x_list).astype(np.float32)
-                self._yolox_grid_y = np.concatenate(grid_y_list).astype(np.float32)
-                self._yolox_stride = np.concatenate(stride_list).astype(np.float32)
-                print(f"[MODEL] YOLOX detected: {yolox_expected} anchors, strides={yolox_strides}")
-            elif dim1 < dim2:
-                self._model_output_format = "v8"
-            else:
-                self._model_output_format = "v5"
-        else:
-            self._model_output_format = "v5"
+            grid_x_list, grid_y_list, stride_list = [], [], []
+            for s in yolox_strides:
+                gs_h, gs_w = model_h // s, model_w // s
+                yv, xv = np.meshgrid(np.arange(gs_h), np.arange(gs_w), indexing='ij')
+                grid_x_list.append(xv.flatten())
+                grid_y_list.append(yv.flatten())
+                stride_list.append(np.full(gs_h * gs_w, s))
+            self._yolox_grid_x = np.concatenate(grid_x_list).astype(np.float32)
+            self._yolox_grid_y = np.concatenate(grid_y_list).astype(np.float32)
+            self._yolox_stride = np.concatenate(stride_list).astype(np.float32)
         self._model_skip_normalize = self._check_skip_normalize(path, self._model_output_format)
         self.model_status_label.configure(text=f"已加载: {self.model_var.get()} ({model_w}x{model_h} {self._model_output_format})", foreground="green")
         self.status_var.set("模型已加载。")
@@ -1673,7 +1827,11 @@ class VisionViewerApp:
             if skip_norm:
                 # Model expects 0-255 raw RGB pixel input (bettercam gives BGR, so convert)
                 im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype)
+            elif out_fmt == "v8":
+                # YOLOv8/v11 models are trained on RGB; bettercam gives BGR → convert
+                im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype) / 255.0
             else:
+                # YOLOv5 models: keep BGR (YOLOv5 pipeline uses BGR internally)
                 im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
             im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
 
@@ -1865,6 +2023,11 @@ class VisionViewerApp:
                                      "box_h": box_h, "box_w": box_w, "area": area,
                                      "dist": dist, "xyxy": ibox})
 
+            # Apply class filter from GUI checkboxes (if user unchecked some classes)
+            _enabled_cls = self._get_enabled_class_ids()
+            if _enabled_cls is not None:
+                all_dets = [d for d in all_dets if d["cls"] in _enabled_cls]
+
             if is_headbody_model and has_explicit_cls and len(all_dets) > 0:
                 # Explicit class-ID model (e.g. 0警1头2匪3头): use class IDs directly
                 for d in all_dets:
@@ -2036,9 +2199,10 @@ class VisionViewerApp:
 
                     if cur_aim_mode == "assist":
                         # --- Aim Assist mode ---
-                        # During rigid spray, suppress Y for assist too
+                        # During rigid spray, suppress Y for assist (unless AI correction enabled)
                         rigid_spraying_a = self._rigid_spray_active and self.rigid_recoil_var.get()
-                        if rigid_spraying_a:
+                        ai_correct = self.rigid_ai_correct_var.get()
+                        if rigid_spraying_a and not ai_correct:
                             rawY = 0.0
                         # Additive pull toward target. User keeps full mouse control.
                         # Pull strength = proportional to offset, scaled by proximity:
@@ -2077,9 +2241,14 @@ class VisionViewerApp:
                         # During active spray, suppress Y-axis aim correction.
                         # Vertical control is handled entirely by the recoil pattern;
                         # aim only tracks horizontally (X) for spray transfer.
+                        # Exception: when AI dual-axis correction is enabled with rigid recoil,
+                        # keep Y tracking so AI can correct for target movement in real-time.
                         rigid_spraying = self._rigid_spray_active and self.rigid_recoil_var.get()
-                        spraying = rigid_spraying or (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
-                        if spraying:
+                        ai_correct = self.rigid_ai_correct_var.get()
+                        lerp_spraying = (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
+                        if rigid_spraying and not ai_correct:
+                            rawY = 0.0
+                        elif lerp_spraying:
                             rawY = 0.0
 
                         # Osiris-style smoothing: offset / smooth

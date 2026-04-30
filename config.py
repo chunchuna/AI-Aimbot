@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 0.6
+aaMovementAmp = 1.3
 
 # Person Class Confidence
 confidence = 0.1
@@ -29,7 +29,7 @@ headshot_mode = True
 #   0x06 = X2 mouse button (side button)
 #   0x10 = Shift key
 #   0x11 = Ctrl key
-aaActivateKey = 0x2
+aaActivateKey = 0x1
 
 # Secondary aim activation key (0=disabled)
 # Common: 0x05=X1 side button, 0x06=X2 side button
@@ -50,24 +50,24 @@ aaAimMode = "aimbot"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.0
+aaSmoothFactor = 1.9
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 137
+aaFOV = 202
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = 11
+crosshairYOffset = 21
 
 # Screen capture FPS (30-500)
 captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "AK-47"
+recoilWeapon = "M4A4"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 1.0
+recoilStrength = 0.5
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
 recoilSmooth = 8
@@ -75,21 +75,25 @@ recoilSmooth = 8
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
 # Set to match your fire key to avoid recoil during grenades etc.
-recoilKey = 1
+recoilKey = 2
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
-aimToggleKey = 116
-recoilToggleKey = 120
+aimToggleKey = 118
+recoilToggleKey = 122
 triggerToggleKey = 121
 
 # Rigid recoil mode (FullExternal-style dedicated thread)
 # Weapon for rigid recoil ("关闭 (Off)" = disabled)
-rigidWeapon = "关闭 (Off)"
-# Smoothness: "rigid" (most precise), "semiRigid" (moderate), "soft" (most natural)
-rigidSmoothness = "rigid"
+rigidWeapon = "AK-47"
 # CS2 in-game sensitivity (MUST match your game setting for accurate recoil control)
-cs2Sensitivity = 2.5
+cs2Sensitivity = 1.08
+# Smoothness: steps=sub-moves per bullet (1=instant, 2~3=moderate, 5+=smooth)
+rigidSteps = 4
+# Delay between sub-steps in ms (recommended: 1step=100, 2steps=25, 5steps=4)
+rigidDelay1 = 100
+# Extra delay after all sub-steps in ms (usually 0)
+rigidDelay2 = 8
 
 # Triggerbot settings
 # Delay in ms before firing when crosshair is on target (0=instant, 50~150=natural)
@@ -105,7 +109,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\416-vx-0警1头2匪3头.onnx"
+selectedModel = "models\v11s416.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU
