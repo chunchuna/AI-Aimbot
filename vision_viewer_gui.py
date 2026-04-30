@@ -623,9 +623,13 @@ class VisionViewerApp:
         self.recoil_key_var.set(KEY_CODE_TO_NAME.get(cur_rc_key, "鼠标左键 (Left Click)"))
         # Recoil key state for tracking spray (polled by key poll thread)
         self._recoil_key_is_down = False
+        # Minimum hold duration (ms) before recoil activates — tap/click won't trigger
+        self.recoil_hold_ms_var = tk.IntVar(value=_read_config_value("recoilHoldMs", 100, int))
 
         # Recoil enabled toggle (like aim_enabled_var for aim)
         self.recoil_enabled_var = tk.BooleanVar(value=True)
+        # Recoil only when aim key is held (prevents recoil during grenade throws etc.)
+        self.recoil_aim_only_var = tk.BooleanVar(value=_read_config_value("recoilAimOnly", False, bool))
 
         # ---- Rigid recoil mode (FullExternal-style dedicated thread) ----
         self.rigid_recoil_var = tk.BooleanVar(value=False)  # checkbox to enable rigid mode
@@ -973,6 +977,20 @@ class VisionViewerApp:
                  resolution=1, command=lambda v: self.recoil_smooth_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="1=瞬移(机器感) 3~5=自然手感 8=非常柔和", font=("", 8)).pack(anchor="w")
 
+        # Recoil hold threshold (tap vs hold)
+        f_rc_hold = ttk.Frame(right); f_rc_hold.pack(fill="x", pady=2)
+        ttk.Label(f_rc_hold, text="按住延迟(ms):").pack(side="left")
+        self.recoil_hold_label = ttk.Label(f_rc_hold, text=str(self.recoil_hold_ms_var.get()))
+        self.recoil_hold_label.pack(side="right")
+        tk.Scale(right, from_=0, to=300, orient="horizontal", variable=self.recoil_hold_ms_var,
+                 resolution=10, command=lambda v: self.recoil_hold_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="按住超过此时间才压枪，点射不触发 (0=立即，推荐80~150)", font=("", 8)).pack(anchor="w")
+
+        # Recoil aim-only checkbox
+        ttk.Checkbutton(right, text="仅自瞄时压枪 (防止投掷物等误触压枪)",
+                         variable=self.recoil_aim_only_var).pack(anchor="w", pady=2)
+        ttk.Label(right, text="勾选后只有按住自瞄键时才会压枪", font=("", 8)).pack(anchor="w")
+
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # --- Rigid Recoil Mode (FullExternal-style) ---
@@ -1315,6 +1333,7 @@ class VisionViewerApp:
         Fixes integer truncation by accumulating float remainders.
         """
         count = 0  # current bullet index (0 = idle, 1..size-1 = active)
+        _rigid_press_t = 0.0  # when recoil key was first pressed (for hold threshold)
 
         while self._rigid_recoil_running:
             # Check if rigid recoil is enabled
@@ -1345,15 +1364,33 @@ class VisionViewerApp:
             # Read recoil trigger key
             rc_key = KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01)
 
+            # Aim-only gate: if enabled, require aim key to be held for recoil
+            rc_aim_only = self.recoil_aim_only_var.get()
+            aim_key_held = self._key_is_down
+
             # Check if trigger key is NOT held — reset spray
-            if not (win32api is not None and win32api.GetAsyncKeyState(rc_key) < 0):
+            rc_hold_ms = self.recoil_hold_ms_var.get()
+            key_held = (win32api is not None and win32api.GetAsyncKeyState(rc_key) < 0)
+            if rc_aim_only and not aim_key_held:
+                key_held = False  # suppress recoil when aim key not held
+            if not key_held:
                 if count != 0:
                     count = 0
                     self._rigid_spray_active = False
+                _rigid_press_t = 0.0
                 time.sleep(0.001)
                 continue
 
-            # Trigger key IS held — check magazine end
+            # Key IS held — track hold duration for tap-vs-hold detection
+            if _rigid_press_t == 0.0:
+                _rigid_press_t = time.perf_counter()
+            held_dur_ms = (time.perf_counter() - _rigid_press_t) * 1000.0
+            if held_dur_ms < rc_hold_ms:
+                # Still in tap zone — don't start spraying yet
+                time.sleep(0.001)
+                continue
+
+            # Trigger key IS held long enough — check magazine end
             if count >= size - 1:
                 count = 0
                 self._rigid_spray_active = False
@@ -2096,6 +2133,7 @@ class VisionViewerApp:
         recoil_current_y = 0.0
         recoil_accum_x = 0.0    # Total mouse pixels applied (for aim offset calc)
         recoil_accum_y = 0.0
+        recoil_key_press_time = 0.0  # When recoil key was first pressed (for hold threshold)
 
         # Triggerbot state
         trigger_on_target_since = 0.0  # timestamp when crosshair first entered a target box
@@ -2702,10 +2740,17 @@ class VisionViewerApp:
             rc_smooth = max(self.recoil_smooth_var.get(), 1)
             rc_enabled = self.recoil_enabled_var.get()
 
+            # Aim-only gate: if enabled, treat recoil key as NOT pressed when aim key is not held
+            rc_aim_only = self.recoil_aim_only_var.get()
+            if rc_aim_only and not self._key_is_down:
+                cur_lmb = False
+
             if rc_enabled and rc_mag > 0 and rc_strength > 0 and not _rigid_active:
+                rc_hold_threshold = self.recoil_hold_ms_var.get()
                 if cur_lmb and not prev_lmb:
-                    # LMB just pressed — start spray
-                    spray_start_time = time.perf_counter()
+                    # LMB just pressed — record press time, don't start spray yet
+                    recoil_key_press_time = time.perf_counter()
+                    spray_start_time = 0.0
                     last_recoil_idx = -1
                     recoil_target_x = 0.0
                     recoil_target_y = 0.0
@@ -2713,6 +2758,12 @@ class VisionViewerApp:
                     recoil_current_y = 0.0
                     recoil_accum_x = 0.0
                     recoil_accum_y = 0.0
+
+                # Only activate spray after holding key for rc_hold_threshold ms
+                if cur_lmb and recoil_key_press_time > 0 and spray_start_time == 0.0:
+                    held_ms = (time.perf_counter() - recoil_key_press_time) * 1000.0
+                    if held_ms >= rc_hold_threshold:
+                        spray_start_time = time.perf_counter()
 
                 if cur_lmb and spray_start_time > 0:
                     # Calculate which bullet we're on using per-bullet timing
