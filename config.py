@@ -101,6 +101,17 @@ antiflashDelay = 0.5
 # Minimum confidence to trigger anti-flash (0.1~1.0, default 0.5)
 antiflashConf = 0.5
 
+# Color detection mode (找色模式) — use HSV color instead of AI model
+colorPreset = "黄色 (Yellow)"
+colorHLow = 20
+colorSLow = 125
+colorVLow = 150
+colorHHigh = 40
+colorSHigh = 255
+colorVHigh = 255
+colorSmooth = 0.55
+colorMinArea = 300
+
 # Triggerbot settings
 # Delay in ms before firing when crosshair is on target (0=instant, 50~150=natural)
 triggerDelay = 0

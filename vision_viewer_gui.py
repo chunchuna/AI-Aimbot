@@ -541,6 +541,27 @@ class VisionViewerApp:
         cur_trig_hk = _read_config_hex("triggerToggleKey", 0x76)  # F7
         self.trigger_toggle_key_var.set(HOTKEY_CODE_TO_NAME.get(cur_trig_hk, "F7"))
 
+        # Color detection mode (找色模式)
+        self.color_mode_var = tk.BooleanVar(value=False)  # True = use color detection instead of AI
+        # HSV color presets for different games/highlights
+        self._color_presets = {
+            "紫色 (Purple)": {"lower": [140, 110, 150], "upper": [150, 195, 255]},
+            "红色 (Red)":    {"lower": [0, 150, 150],   "upper": [10, 255, 255]},
+            "黄色 (Yellow)": {"lower": [20, 125, 150],  "upper": [40, 255, 255]},
+            "绿色 (Green)":  {"lower": [40, 100, 100],  "upper": [80, 255, 255]},
+            "青色 (Cyan)":   {"lower": [80, 100, 100],  "upper": [100, 255, 255]},
+            "自定义 (Custom)": None,  # Uses manual HSV sliders
+        }
+        self.color_preset_var = tk.StringVar(value=_read_config_value("colorPreset", "紫色 (Purple)", str))
+        self.color_h_low_var = tk.IntVar(value=_read_config_value("colorHLow", 140, int))
+        self.color_s_low_var = tk.IntVar(value=_read_config_value("colorSLow", 110, int))
+        self.color_v_low_var = tk.IntVar(value=_read_config_value("colorVLow", 150, int))
+        self.color_h_high_var = tk.IntVar(value=_read_config_value("colorHHigh", 150, int))
+        self.color_s_high_var = tk.IntVar(value=_read_config_value("colorSHigh", 195, int))
+        self.color_v_high_var = tk.IntVar(value=_read_config_value("colorVHigh", 255, int))
+        self.color_smooth_var = tk.DoubleVar(value=_read_config_value("colorSmooth", 0.3, float))
+        self.color_min_area_var = tk.IntVar(value=_read_config_value("colorMinArea", 20, int))
+
         # Anti-flash (自动背闪)
         self.antiflash_enabled_var = tk.BooleanVar(value=False)
         self.antiflash_delay_var = tk.DoubleVar(value=_read_config_value("antiflashDelay", 0.5, float))  # seconds
@@ -930,6 +951,61 @@ class VisionViewerApp:
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
+        # --- Color detection mode (找色模式) ---
+        ttk.Label(right, text="── 找色模式 (Color Aim) ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
+        ttk.Checkbutton(right, text="启用找色模式 (关闭AI识别)", variable=self.color_mode_var).pack(anchor="w")
+        ttk.Label(right, text="用颜色检测代替AI, 帧率极高, 适合有高亮轮廓的游戏", font=("", 8)).pack(anchor="w")
+
+        # Color preset
+        f_cp = ttk.Frame(right); f_cp.pack(fill="x", pady=2)
+        ttk.Label(f_cp, text="颜色预设:").pack(side="left")
+        color_combo = ttk.Combobox(f_cp, textvariable=self.color_preset_var,
+                                    values=list(self._color_presets.keys()),
+                                    state="readonly", width=18)
+        color_combo.pack(side="right")
+        color_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_color_preset())
+
+        # HSV sliders
+        self._color_hsv_frame = ttk.LabelFrame(right, text="HSV 范围")
+        self._color_hsv_frame.pack(fill="x", pady=2)
+        # H low/high
+        f_h = ttk.Frame(self._color_hsv_frame); f_h.pack(fill="x")
+        ttk.Label(f_h, text="H:", width=3).pack(side="left")
+        tk.Scale(f_h, from_=0, to=179, orient="horizontal", variable=self.color_h_low_var, length=80).pack(side="left", expand=True, fill="x")
+        ttk.Label(f_h, text="~").pack(side="left")
+        tk.Scale(f_h, from_=0, to=179, orient="horizontal", variable=self.color_h_high_var, length=80).pack(side="left", expand=True, fill="x")
+        # S low/high
+        f_s = ttk.Frame(self._color_hsv_frame); f_s.pack(fill="x")
+        ttk.Label(f_s, text="S:", width=3).pack(side="left")
+        tk.Scale(f_s, from_=0, to=255, orient="horizontal", variable=self.color_s_low_var, length=80).pack(side="left", expand=True, fill="x")
+        ttk.Label(f_s, text="~").pack(side="left")
+        tk.Scale(f_s, from_=0, to=255, orient="horizontal", variable=self.color_s_high_var, length=80).pack(side="left", expand=True, fill="x")
+        # V low/high
+        f_v = ttk.Frame(self._color_hsv_frame); f_v.pack(fill="x")
+        ttk.Label(f_v, text="V:", width=3).pack(side="left")
+        tk.Scale(f_v, from_=0, to=255, orient="horizontal", variable=self.color_v_low_var, length=80).pack(side="left", expand=True, fill="x")
+        ttk.Label(f_v, text="~").pack(side="left")
+        tk.Scale(f_v, from_=0, to=255, orient="horizontal", variable=self.color_v_high_var, length=80).pack(side="left", expand=True, fill="x")
+
+        # Color smooth factor
+        f_cs = ttk.Frame(right); f_cs.pack(fill="x", pady=2)
+        ttk.Label(f_cs, text="找色平滑:").pack(side="left")
+        self.color_smooth_label = ttk.Label(f_cs, text=f"{self.color_smooth_var.get():.2f}")
+        self.color_smooth_label.pack(side="right")
+        tk.Scale(right, from_=0.05, to=1.0, orient="horizontal", variable=self.color_smooth_var,
+                 resolution=0.05, command=lambda v: self.color_smooth_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+
+        # Min contour area
+        f_ca = ttk.Frame(right); f_ca.pack(fill="x", pady=2)
+        ttk.Label(f_ca, text="最小面积:").pack(side="left")
+        self.color_area_label = ttk.Label(f_ca, text=str(self.color_min_area_var.get()))
+        self.color_area_label.pack(side="right")
+        tk.Scale(right, from_=5, to=500, orient="horizontal", variable=self.color_min_area_var,
+                 resolution=5, command=lambda v: self.color_area_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="平滑=鼠标跟随速度 面积=过滤小噪点", font=("", 8)).pack(anchor="w")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
         # --- Toggle Hotkeys & Audio ---
         ttk.Label(right, text="── 快捷开关 ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
 
@@ -1235,6 +1311,17 @@ class VisionViewerApp:
             "antiflashEnabled": self.antiflash_enabled_var.get(),
             "antiflashDelay": round(self.antiflash_delay_var.get(), 1),
             "antiflashConf": round(self.antiflash_conf_var.get(), 2),
+            # Color detection mode
+            "colorModeEnabled": self.color_mode_var.get(),
+            "colorPreset": self.color_preset_var.get(),
+            "colorHLow": self.color_h_low_var.get(),
+            "colorSLow": self.color_s_low_var.get(),
+            "colorVLow": self.color_v_low_var.get(),
+            "colorHHigh": self.color_h_high_var.get(),
+            "colorSHigh": self.color_s_high_var.get(),
+            "colorVHigh": self.color_v_high_var.get(),
+            "colorSmooth": round(self.color_smooth_var.get(), 2),
+            "colorMinArea": self.color_min_area_var.get(),
         }
 
     def _apply_config_vals(self, vals: dict):
@@ -1304,6 +1391,27 @@ class VisionViewerApp:
             self.antiflash_delay_var.set(float(vals["antiflashDelay"]))
         if "antiflashConf" in vals:
             self.antiflash_conf_var.set(float(vals["antiflashConf"]))
+        # Color detection mode
+        if "colorModeEnabled" in vals:
+            self.color_mode_var.set(bool(vals["colorModeEnabled"]))
+        if "colorPreset" in vals:
+            self.color_preset_var.set(str(vals["colorPreset"]))
+        if "colorHLow" in vals:
+            self.color_h_low_var.set(int(vals["colorHLow"]))
+        if "colorSLow" in vals:
+            self.color_s_low_var.set(int(vals["colorSLow"]))
+        if "colorVLow" in vals:
+            self.color_v_low_var.set(int(vals["colorVLow"]))
+        if "colorHHigh" in vals:
+            self.color_h_high_var.set(int(vals["colorHHigh"]))
+        if "colorSHigh" in vals:
+            self.color_s_high_var.set(int(vals["colorSHigh"]))
+        if "colorVHigh" in vals:
+            self.color_v_high_var.set(int(vals["colorVHigh"]))
+        if "colorSmooth" in vals:
+            self.color_smooth_var.set(float(vals["colorSmooth"]))
+        if "colorMinArea" in vals:
+            self.color_min_area_var.set(int(vals["colorMinArea"]))
         # Toggle states
         if "aimEnabled" in vals:
             self.aim_enabled_var.set(bool(vals["aimEnabled"]))
@@ -1324,7 +1432,7 @@ class VisionViewerApp:
 
     # -------------------------------------------------------- config save
     # Profile-only keys (not written to config.py)
-    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled", "rigidAiCorrect", "antiflashEnabled"}
+    _PROFILE_ONLY_KEYS = {"aimEnabled", "recoilEnabled", "triggerEnabled", "voiceEnabled", "rigidRecoilEnabled", "rigidAiCorrect", "antiflashEnabled", "colorModeEnabled"}
 
     def save_config(self):
         vals = self._gather_config_vals()
@@ -1435,6 +1543,19 @@ class VisionViewerApp:
             messagebox.showinfo("成功", f"方案已重命名: 「{old_name}」→「{new_name}」")
         except Exception as e:
             messagebox.showerror("错误", f"重命名失败: {e}")
+
+    def _apply_color_preset(self):
+        """Apply a color preset's HSV values to the sliders."""
+        name = self.color_preset_var.get()
+        preset = self._color_presets.get(name)
+        if preset is None:
+            return  # Custom — user sets manually
+        self.color_h_low_var.set(preset["lower"][0])
+        self.color_s_low_var.set(preset["lower"][1])
+        self.color_v_low_var.set(preset["lower"][2])
+        self.color_h_high_var.set(preset["upper"][0])
+        self.color_s_high_var.set(preset["upper"][1])
+        self.color_v_high_var.set(preset["upper"][2])
 
     # ------------------------------------------------------- window list
     def refresh_windows(self):
@@ -1755,7 +1876,7 @@ class VisionViewerApp:
         self._mouse_mode = False
         self._capture_region = region  # for overlay coordinate mapping
         try:
-            if self.model is None:
+            if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
             self.camera = bettercam.create(region=region, output_color="BGRA")
             if self.camera is None:
@@ -1778,7 +1899,7 @@ class VisionViewerApp:
             return
         self._mouse_mode = True
         try:
-            if self.model is None:
+            if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
             # Create camera without fixed region — we pass region per-frame in grab()
             self.camera = bettercam.create(output_color="BGRA")
@@ -1865,6 +1986,7 @@ class VisionViewerApp:
                 image = image[:, :, :3]
 
             # ----- Read LIVE config from tkinter vars (real-time, no restart) -----
+            use_color_mode = self.color_mode_var.get()
             cur_fov = self.fov_var.get()
             cur_smooth = self.smooth_var.get()
             cur_amp = self.amp_var.get()
@@ -1872,6 +1994,11 @@ class VisionViewerApp:
             cur_target = TARGET_OPTIONS.get(self.target_var.get(), "head")
             cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
             aim_on = self.aim_enabled_var.get()
+            # Color mode overrides: convert color_smooth (0.05~1.0 multiplier) to smooth divisor
+            if use_color_mode:
+                _cs = self.color_smooth_var.get()
+                cur_smooth = max(1.0 / max(_cs, 0.05), 1.0)
+                cur_amp = 1.0  # color mode doesn't need amp scaling
             show_preview = self.visuals_var.get()
             use_overlay = self.overlay_var.get()
             # Manage overlay lifecycle
@@ -1889,330 +2016,368 @@ class VisionViewerApp:
             render_counter += 1
             do_render = (show_preview or use_overlay) and (render_counter % RENDER_EVERY_N == 0)
 
-            # Preprocess — resize to model input size if needed
-            with self._model_lock:
-                model_w, model_h = self._model_input_size
-            cap_h, cap_w = image.shape[:2]
-            if cap_w != model_w or cap_h != model_h:
-                im_resized = cv2.resize(image, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
-                scale_x = cap_w / model_w
-                scale_y = cap_h / model_h
-            else:
-                im_resized = image
+            if use_color_mode:
+                # ============ COLOR DETECTION MODE (找色模式) ============
+                # Skip ONNX entirely — use HSV color detection for ultra-high FPS
+                t_infer_start = time.perf_counter()
+                cap_h, cap_w = image.shape[:2]
                 scale_x = 1.0
                 scale_y = 1.0
-            with self._model_lock:
-                model_dtype = self._model_input_dtype
-                out_fmt = self._model_output_format
-                skip_norm = getattr(self, '_model_skip_normalize', False)
-            if skip_norm:
-                # Model expects 0-255 raw RGB pixel input (bettercam gives BGR, so convert)
-                im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype)
-            elif out_fmt == "v8":
-                # YOLOv8/v11 models are trained on RGB; bettercam gives BGR → convert
-                im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype) / 255.0
-            else:
-                # YOLOv5 models: keep BGR (YOLOv5 pipeline uses BGR internally)
-                im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
-            im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
 
-            t_infer_start = time.perf_counter()
-            try:
-                with self._model_lock:
-                    input_name = self._model_input_name
-                    out_fmt = self._model_output_format
-                    outputs = self.model.run(None, {input_name: im})
-                raw = outputs[0]
+                # Read HSV range from GUI
+                hsv_lower = np.array([self.color_h_low_var.get(), self.color_s_low_var.get(), self.color_v_low_var.get()])
+                hsv_upper = np.array([self.color_h_high_var.get(), self.color_s_high_var.get(), self.color_v_high_var.get()])
+                min_area = self.color_min_area_var.get()
 
-                if out_fmt == "yolox":
-                    # YOLOX: [1, N_anchors, 5+nc] — bbox is raw (needs grid decode), obj+cls are sigmoid
-                    with self._model_lock:
-                        gx = self._yolox_grid_x
-                        gy = self._yolox_grid_y
-                        gs = self._yolox_stride
-                    boxes_raw = raw[0]  # [N, 5+nc]
-                    # Decode bbox: cx = (raw_x + grid_x) * stride, cy = (raw_y + grid_y) * stride
-                    #              w  = exp(raw_w) * stride,        h  = exp(raw_h) * stride
-                    dec_cx = (boxes_raw[:, 0] + gx) * gs
-                    dec_cy = (boxes_raw[:, 1] + gy) * gs
-                    dec_w  = np.exp(boxes_raw[:, 2]) * gs
-                    dec_h  = np.exp(boxes_raw[:, 3]) * gs
-                    obj_conf = boxes_raw[:, 4]             # already sigmoid
-                    cls_conf = boxes_raw[:, 5:]            # already sigmoid
-                    nc = cls_conf.shape[1]
-                    if nc > 1:
-                        class_ids = np.argmax(cls_conf, axis=1)
-                        class_max = np.max(cls_conf, axis=1)
-                    else:
-                        class_ids = np.zeros(len(obj_conf), dtype=int)
-                        class_max = cls_conf[:, 0]
-                    confs = obj_conf * class_max            # final score
-                    mask = confs > cur_conf
-                    pred = []
-                    if mask.any():
-                        cx_f, cy_f = dec_cx[mask], dec_cy[mask]
-                        w_f, h_f = dec_w[mask], dec_h[mask]
-                        x1 = cx_f - w_f / 2
-                        y1 = cy_f - h_f / 2
-                        x2 = cx_f + w_f / 2
-                        y2 = cy_f + h_f / 2
-                        confs_f = confs[mask]
-                        class_ids_f = class_ids[mask].astype(np.float32)
-                        dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f], axis=1))
-                        order = torch.argsort(dets[:, 4], descending=True)
-                        dets = dets[order[:50]]
-                        keep = []
-                        while len(dets) > 0 and len(keep) < 10:
-                            keep.append(dets[0])
-                            if len(dets) == 1:
-                                break
-                            ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
-                            dets = dets[1:][ious < 0.45]
-                        pred = [torch.stack(keep)] if keep else []
+                # BGR → HSV → color mask → dilate → find contours
+                hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+                mask = cv2.inRange(hsv_img, hsv_lower, hsv_upper)
+                dilated = cv2.dilate(mask, None, iterations=3)
+                contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                elif out_fmt == "v8":
-                    # YOLOv8 output: [1, 4+nc, anchors] → transpose to [1, anchors, 4+nc]
-                    raw_t = np.transpose(raw, (0, 2, 1))  # [1, 8400, 5]
-                    # raw_t format per row: [cx, cy, w, h, conf_cls0, conf_cls1, ...]
-                    # For single-class: col4 is the class confidence
-                    boxes = raw_t[0]  # [8400, 5+]
-                    nc = boxes.shape[1] - 4  # number of classes
-                    # Get max class confidence and class id per box
-                    if nc > 1:
-                        class_confs = boxes[:, 4:]
-                        class_ids = np.argmax(class_confs, axis=1)
-                        confs = np.max(class_confs, axis=1)
-                    else:
-                        confs = boxes[:, 4]
-                        class_ids = np.zeros(len(confs), dtype=int)
-                    # Filter by confidence
-                    mask = confs > cur_conf
-                    boxes_f = boxes[mask]
-                    confs_f = confs[mask]
-                    class_ids_f = class_ids[mask]
-                    # Convert cx,cy,w,h to x1,y1,x2,y2
-                    pred = []
-                    if len(boxes_f) > 0:
-                        cx, cy, w, h = boxes_f[:, 0], boxes_f[:, 1], boxes_f[:, 2], boxes_f[:, 3]
-                        x1 = cx - w / 2
-                        y1 = cy - h / 2
-                        x2 = cx + w / 2
-                        y2 = cy + h / 2
-                        # Simple NMS using torchvision-style or manual
-                        dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f.astype(np.float32)], axis=1))
-                        # Sort by confidence descending, keep top 10
-                        order = torch.argsort(dets[:, 4], descending=True)
-                        dets = dets[order[:50]]
-                        # Simple greedy NMS
-                        keep = []
-                        while len(dets) > 0 and len(keep) < 10:
-                            keep.append(dets[0])
-                            if len(dets) == 1:
-                                break
-                            ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
-                            dets = dets[1:][ious < 0.45]
-                        pred = [torch.stack(keep)] if keep else []
-                else:
-                    # YOLOv5 output: [1, N, 85]
-                    pred = torch.from_numpy(raw).to('cpu')
-                    pred = non_max_suppression(pred, cur_conf, cur_conf, 0, False, max_det=10)
-            except Exception as exc:
-                print(f"[ERROR] Inference failed: {exc}")
-                self.root.after(0, self.status_var.set, f"检测错误: {exc}")
-                break
-            t_infer_done = time.perf_counter()
+                # Build targets from contours (same dict format as AI detection)
+                targets = []
+                head_boxes = []
+                display = image.copy() if do_render else None
+                all_dets = []
+                is_headbody_model = False  # color mode has no head/body distinction
 
-            # Accumulate perf stats
-            perf_capture_ms += (t_capture_done - t_frame_start) * 1000
-            perf_infer_ms += (t_infer_done - t_infer_start) * 1000
-            perf_total_ms += (t_infer_done - t_frame_start) * 1000
-            perf_count += 1
-
-            # --- Build targets ---
-            targets = []
-            head_boxes = []  # Head bounding boxes for 头身 models
-            display = image.copy() if do_render else None
-            model_name = self.model_var.get()
-            # Detect head+body model: "头身" OR filename contains class-head mapping like "0警1头2匪3头"
-            is_headbody_model = "头身" in model_name or "头" in model_name
-            # Parse explicit head/body class IDs from filename (e.g. "0警1头2匪3头")
-            # Pattern: digit + label, where "头" = head class, anything else = body class
-            head_cls_ids = set()
-            body_cls_ids = set()
-            ct_body_cls = set()
-            t_body_cls = set()
-            if is_headbody_model:
-                import re as _re
-                # Match patterns like "0警", "1头", "2匪", "3头" in filename
-                cls_matches = _re.findall(r'(\d+)([\u4e00-\u9fff]+)', os.path.basename(model_name))
-                if cls_matches:
-                    for cid_str, label in cls_matches:
-                        cid = int(cid_str)
-                        if "头" in label:
-                            head_cls_ids.add(cid)
-                        else:
-                            body_cls_ids.add(cid)
-                            if "警" in label:
-                                ct_body_cls.add(cid)
-                            elif "匪" in label:
-                                t_body_cls.add(cid)
-            has_explicit_cls = len(head_cls_ids) > 0 and len(body_cls_ids) > 0
-
-            cur_team = TEAM_OPTIONS.get(self.team_var.get(), "all")
-            # Team filter: depends on model type
-            if has_explicit_cls:
-                # 4-class model: CT-body/T-body are separate classes
-                if cur_team == "ct":
-                    enemy_body_cls = t_body_cls   # I am CT → aim at T bodies
-                elif cur_team == "t":
-                    enemy_body_cls = ct_body_cls   # I am T → aim at CT bodies
-                else:
-                    enemy_body_cls = body_cls_ids   # aim at all bodies
-                enemy_cls = None  # not used in explicit mode
-            else:
-                # 2-class model (cs2_320 convention): ct=0, t=1
-                if cur_team == "ct":
-                    enemy_cls = {1}
-                elif cur_team == "t":
-                    enemy_cls = {0}
-                else:
-                    enemy_cls = None     # None = accept all classes
-                enemy_body_cls = None
-
-            # First pass: collect all detections with their info
-            all_dets = []
-            for det in pred:
-                if len(det) == 0:
-                    continue
-                for *xyxy, conf_val, cls in det:
-                    if float(conf_val) < cur_conf:
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    if area < min_area:
                         continue
-                    cls_id = int(cls)
-                    x1 = float(xyxy[0]) * scale_x
-                    y1 = float(xyxy[1]) * scale_y
-                    x2 = float(xyxy[2]) * scale_x
-                    y2 = float(xyxy[3]) * scale_y
-                    mid_x = (x1 + x2) / 2
-                    mid_y = (y1 + y2) / 2
-                    box_h = y2 - y1
-                    box_w = x2 - x1
-                    area = box_w * box_h
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    mid_x = x + w / 2.0
+                    mid_y = y + h / 2.0
                     dist = ((mid_x - cWidth)**2 + (mid_y - cHeight)**2) ** 0.5
-                    ibox = (int(x1), int(y1), int(x2), int(y2))
-                    all_dets.append({"cls": cls_id, "conf": float(conf_val),
-                                     "mid_x": mid_x, "mid_y": mid_y,
-                                     "box_h": box_h, "box_w": box_w, "area": area,
-                                     "dist": dist, "xyxy": ibox})
-
-            # --- Anti-flash: check for flash class BEFORE class filter ---
-            if (self.antiflash_enabled_var.get() and not self._antiflash_active
-                    and time.perf_counter() > self._antiflash_cooldown_until
-                    and self._model_class_names):
-                af_conf = self.antiflash_conf_var.get()
-                # Find class IDs whose name contains "闪" (flash)
-                flash_cls_ids = {cid for cid, name in self._model_class_names.items() if "闪" in name}
-                if flash_cls_ids:
-                    for d in all_dets:
-                        if d["cls"] in flash_cls_ids and d["conf"] >= af_conf:
-                            # Flash detected! Launch anti-flash in background thread
-                            af_delay = self.antiflash_delay_var.get()
-                            threading.Thread(target=self._antiflash_execute,
-                                             args=(af_delay,), daemon=True).start()
-                            break
-
-            # Apply class filter from GUI checkboxes (if user unchecked some classes)
-            _enabled_cls = self._get_enabled_class_ids()
-            if _enabled_cls is not None:
-                all_dets = [d for d in all_dets if d["cls"] in _enabled_cls]
-
-            if is_headbody_model and has_explicit_cls and len(all_dets) > 0:
-                # Explicit class-ID model (e.g. 0警1头2匪3头): use class IDs directly
-                for d in all_dets:
-                    cls_id = d["cls"]
-                    if cls_id in head_cls_ids:
-                        d["_role"] = "head"
-                        color = (0, 255, 255)
-                        label = f"HEAD(c{cls_id}) {d['conf']:.0%}"
-                        d["_color"] = color; d["_label"] = label
-                        head_boxes.append(d)
-                        if display is not None:
-                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
-                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-                    elif cls_id in body_cls_ids:
-                        d["_role"] = "body"
-                        is_enemy = (enemy_body_cls is None or cls_id in enemy_body_cls)
-                        color = (0, 0, 255) if is_enemy else (255, 180, 0)
-                        side = "CT" if cls_id in ct_body_cls else "T"
-                        label = f"{side}(c{cls_id}) {d['conf']:.0%}"
-                        d["_color"] = color; d["_label"] = label
-                        if enemy_body_cls is None or cls_id in enemy_body_cls:
-                            targets.append(d)
-                        if display is not None:
-                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
-                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    else:
-                        d["_role"] = "body"
-                        color = (0, 255, 0)
-                        label = f"c{cls_id} {d['conf']:.0%}"
-                        d["_color"] = color; d["_label"] = label
-                        targets.append(d)
-                        if display is not None:
-                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
-                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-            elif is_headbody_model and len(all_dets) > 0:
-                # Geometric containment model (e.g. GO_头身): small box inside big box = head
-                all_dets.sort(key=lambda d: d["area"], reverse=True)  # large first
-                for i, d in enumerate(all_dets):
-                    d["_role"] = "body"  # default
-                    # Check if this box's center is inside any larger box
-                    dx, dy = d["mid_x"], d["mid_y"]
-                    for j in range(i):
-                        big = all_dets[j]
-                        bx1, by1, bx2, by2 = big["xyxy"]
-                        if bx1 <= dx <= bx2 and by1 <= dy <= by2 and d["area"] < big["area"] * 0.5:
-                            d["_role"] = "head"
-                            break
-                for d in all_dets:
-                    if d["_role"] == "head":
-                        color = (0, 255, 255)
-                        label = f"HEAD(c{d['cls']}) {d['conf']:.0%}"
-                        d["_color"] = color; d["_label"] = label
-                        head_boxes.append(d)
-                        if display is not None:
-                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
-                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-                    else:
-                        color = (0, 0, 255)
-                        label = f"BODY(c{d['cls']}) {d['conf']:.0%}"
-                        d["_color"] = color; d["_label"] = label
-                        targets.append(d)
-                        if display is not None:
-                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
-                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            else:
-                # Normal model (no 头身): use standard enemy filter
-                for d in all_dets:
-                    is_enemy = (enemy_cls is None or d["cls"] in enemy_cls)
-                    if is_enemy:
-                        targets.append(d)
-                    if enemy_cls is None:
-                        color = (0, 255, 0)
-                    elif is_enemy:
-                        color = (0, 0, 255)
-                    else:
-                        color = (255, 180, 0)
-                    label = f"{'CT' if d['cls'] == 0 else 'T'} {d['conf']:.0%}"
-                    d["_color"] = color; d["_label"] = label
+                    ibox = (x, y, x + w, y + h)
+                    d = {"cls": 0, "conf": 1.0,
+                         "mid_x": mid_x, "mid_y": mid_y,
+                         "box_h": float(h), "box_w": float(w), "area": area,
+                         "dist": dist, "xyxy": ibox}
+                    all_dets.append(d)
+                    targets.append(d)
                     if display is not None:
-                        cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
-                        cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        color = (0, 255, 0)
+                        label = f"COLOR {area:.0f}px"
+                        d["_color"] = color; d["_label"] = label
+                        cv2.rectangle(display, (x, y), (x + w, y + h), color, 2)
+                        cv2.putText(display, label, (x, max(20, y - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+
+                t_infer_done = time.perf_counter()
+
+                # Accumulate perf stats
+                perf_capture_ms += (t_capture_done - t_frame_start) * 1000
+                perf_infer_ms += (t_infer_done - t_infer_start) * 1000
+                perf_total_ms += (t_infer_done - t_frame_start) * 1000
+                perf_count += 1
+
+            else:
+                # ============ AI DETECTION MODE (ONNX) ============
+                # Preprocess — resize to model input size if needed
+                with self._model_lock:
+                    model_w, model_h = self._model_input_size
+                cap_h, cap_w = image.shape[:2]
+                if cap_w != model_w or cap_h != model_h:
+                    im_resized = cv2.resize(image, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
+                    scale_x = cap_w / model_w
+                    scale_y = cap_h / model_h
+                else:
+                    im_resized = image
+                    scale_x = 1.0
+                    scale_y = 1.0
+                with self._model_lock:
+                    model_dtype = self._model_input_dtype
+                    out_fmt = self._model_output_format
+                    skip_norm = getattr(self, '_model_skip_normalize', False)
+                if skip_norm:
+                    # Model expects 0-255 raw RGB pixel input (bettercam gives BGR, so convert)
+                    im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype)
+                elif out_fmt == "v8":
+                    # YOLOv8/v11 models are trained on RGB; bettercam gives BGR → convert
+                    im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype) / 255.0
+                else:
+                    # YOLOv5 models: keep BGR (YOLOv5 pipeline uses BGR internally)
+                    im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
+                im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
+
+                t_infer_start = time.perf_counter()
+                try:
+                    with self._model_lock:
+                        input_name = self._model_input_name
+                        out_fmt = self._model_output_format
+                        outputs = self.model.run(None, {input_name: im})
+                    raw = outputs[0]
+
+                    if out_fmt == "yolox":
+                        # YOLOX: [1, N_anchors, 5+nc] — bbox is raw (needs grid decode), obj+cls are sigmoid
+                        with self._model_lock:
+                            gx = self._yolox_grid_x
+                            gy = self._yolox_grid_y
+                            gs = self._yolox_stride
+                        boxes_raw = raw[0]  # [N, 5+nc]
+                        dec_cx = (boxes_raw[:, 0] + gx) * gs
+                        dec_cy = (boxes_raw[:, 1] + gy) * gs
+                        dec_w  = np.exp(boxes_raw[:, 2]) * gs
+                        dec_h  = np.exp(boxes_raw[:, 3]) * gs
+                        obj_conf = boxes_raw[:, 4]
+                        cls_conf = boxes_raw[:, 5:]
+                        nc = cls_conf.shape[1]
+                        if nc > 1:
+                            class_ids = np.argmax(cls_conf, axis=1)
+                            class_max = np.max(cls_conf, axis=1)
+                        else:
+                            class_ids = np.zeros(len(obj_conf), dtype=int)
+                            class_max = cls_conf[:, 0]
+                        confs = obj_conf * class_max
+                        mask = confs > cur_conf
+                        pred = []
+                        if mask.any():
+                            cx_f, cy_f = dec_cx[mask], dec_cy[mask]
+                            w_f, h_f = dec_w[mask], dec_h[mask]
+                            x1 = cx_f - w_f / 2
+                            y1 = cy_f - h_f / 2
+                            x2 = cx_f + w_f / 2
+                            y2 = cy_f + h_f / 2
+                            confs_f = confs[mask]
+                            class_ids_f = class_ids[mask].astype(np.float32)
+                            dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f], axis=1))
+                            order = torch.argsort(dets[:, 4], descending=True)
+                            dets = dets[order[:50]]
+                            keep = []
+                            while len(dets) > 0 and len(keep) < 10:
+                                keep.append(dets[0])
+                                if len(dets) == 1:
+                                    break
+                                ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
+                                dets = dets[1:][ious < 0.45]
+                            pred = [torch.stack(keep)] if keep else []
+
+                    elif out_fmt == "v8":
+                        # YOLOv8 output: [1, 4+nc, anchors] → transpose to [1, anchors, 4+nc]
+                        raw_t = np.transpose(raw, (0, 2, 1))
+                        boxes = raw_t[0]
+                        nc = boxes.shape[1] - 4
+                        if nc > 1:
+                            class_confs = boxes[:, 4:]
+                            class_ids = np.argmax(class_confs, axis=1)
+                            confs = np.max(class_confs, axis=1)
+                        else:
+                            confs = boxes[:, 4]
+                            class_ids = np.zeros(len(confs), dtype=int)
+                        mask = confs > cur_conf
+                        boxes_f = boxes[mask]
+                        confs_f = confs[mask]
+                        class_ids_f = class_ids[mask]
+                        pred = []
+                        if len(boxes_f) > 0:
+                            cx, cy, w, h = boxes_f[:, 0], boxes_f[:, 1], boxes_f[:, 2], boxes_f[:, 3]
+                            x1 = cx - w / 2
+                            y1 = cy - h / 2
+                            x2 = cx + w / 2
+                            y2 = cy + h / 2
+                            dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f.astype(np.float32)], axis=1))
+                            order = torch.argsort(dets[:, 4], descending=True)
+                            dets = dets[order[:50]]
+                            keep = []
+                            while len(dets) > 0 and len(keep) < 10:
+                                keep.append(dets[0])
+                                if len(dets) == 1:
+                                    break
+                                ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
+                                dets = dets[1:][ious < 0.45]
+                            pred = [torch.stack(keep)] if keep else []
+                    else:
+                        # YOLOv5 output: [1, N, 85]
+                        pred = torch.from_numpy(raw).to('cpu')
+                        pred = non_max_suppression(pred, cur_conf, cur_conf, 0, False, max_det=10)
+                except Exception as exc:
+                    print(f"[ERROR] Inference failed: {exc}")
+                    self.root.after(0, self.status_var.set, f"检测错误: {exc}")
+                    break
+                t_infer_done = time.perf_counter()
+
+                # Accumulate perf stats
+                perf_capture_ms += (t_capture_done - t_frame_start) * 1000
+                perf_infer_ms += (t_infer_done - t_infer_start) * 1000
+                perf_total_ms += (t_infer_done - t_frame_start) * 1000
+                perf_count += 1
+
+                # --- Build targets ---
+                targets = []
+                head_boxes = []
+                display = image.copy() if do_render else None
+                model_name = self.model_var.get()
+                is_headbody_model = "头身" in model_name or "头" in model_name
+                head_cls_ids = set()
+                body_cls_ids = set()
+                ct_body_cls = set()
+                t_body_cls = set()
+                if is_headbody_model:
+                    import re as _re
+                    cls_matches = _re.findall(r'(\d+)([\u4e00-\u9fff]+)', os.path.basename(model_name))
+                    if cls_matches:
+                        for cid_str, label in cls_matches:
+                            cid = int(cid_str)
+                            if "头" in label:
+                                head_cls_ids.add(cid)
+                            else:
+                                body_cls_ids.add(cid)
+                                if "警" in label:
+                                    ct_body_cls.add(cid)
+                                elif "匪" in label:
+                                    t_body_cls.add(cid)
+                has_explicit_cls = len(head_cls_ids) > 0 and len(body_cls_ids) > 0
+
+                cur_team = TEAM_OPTIONS.get(self.team_var.get(), "all")
+                if has_explicit_cls:
+                    if cur_team == "ct":
+                        enemy_body_cls = t_body_cls
+                    elif cur_team == "t":
+                        enemy_body_cls = ct_body_cls
+                    else:
+                        enemy_body_cls = body_cls_ids
+                    enemy_cls = None
+                else:
+                    if cur_team == "ct":
+                        enemy_cls = {1}
+                    elif cur_team == "t":
+                        enemy_cls = {0}
+                    else:
+                        enemy_cls = None
+                    enemy_body_cls = None
+
+                # First pass: collect all detections with their info
+                all_dets = []
+                for det in pred:
+                    if len(det) == 0:
+                        continue
+                    for *xyxy, conf_val, cls in det:
+                        if float(conf_val) < cur_conf:
+                            continue
+                        cls_id = int(cls)
+                        x1 = float(xyxy[0]) * scale_x
+                        y1 = float(xyxy[1]) * scale_y
+                        x2 = float(xyxy[2]) * scale_x
+                        y2 = float(xyxy[3]) * scale_y
+                        mid_x = (x1 + x2) / 2
+                        mid_y = (y1 + y2) / 2
+                        box_h = y2 - y1
+                        box_w = x2 - x1
+                        area = box_w * box_h
+                        dist = ((mid_x - cWidth)**2 + (mid_y - cHeight)**2) ** 0.5
+                        ibox = (int(x1), int(y1), int(x2), int(y2))
+                        all_dets.append({"cls": cls_id, "conf": float(conf_val),
+                                         "mid_x": mid_x, "mid_y": mid_y,
+                                         "box_h": box_h, "box_w": box_w, "area": area,
+                                         "dist": dist, "xyxy": ibox})
+
+                # --- Anti-flash: check for flash class BEFORE class filter ---
+                if (self.antiflash_enabled_var.get() and not self._antiflash_active
+                        and time.perf_counter() > self._antiflash_cooldown_until
+                        and self._model_class_names):
+                    af_conf = self.antiflash_conf_var.get()
+                    flash_cls_ids = {cid for cid, name in self._model_class_names.items() if "闪" in name}
+                    if flash_cls_ids:
+                        for d in all_dets:
+                            if d["cls"] in flash_cls_ids and d["conf"] >= af_conf:
+                                af_delay = self.antiflash_delay_var.get()
+                                threading.Thread(target=self._antiflash_execute,
+                                                 args=(af_delay,), daemon=True).start()
+                                break
+
+                # Apply class filter from GUI checkboxes (if user unchecked some classes)
+                _enabled_cls = self._get_enabled_class_ids()
+                if _enabled_cls is not None:
+                    all_dets = [d for d in all_dets if d["cls"] in _enabled_cls]
+
+                if is_headbody_model and has_explicit_cls and len(all_dets) > 0:
+                    for d in all_dets:
+                        cls_id = d["cls"]
+                        if cls_id in head_cls_ids:
+                            d["_role"] = "head"
+                            color = (0, 255, 255)
+                            label = f"HEAD(c{cls_id}) {d['conf']:.0%}"
+                            d["_color"] = color; d["_label"] = label
+                            head_boxes.append(d)
+                            if display is not None:
+                                cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                                cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+                        elif cls_id in body_cls_ids:
+                            d["_role"] = "body"
+                            is_enemy = (enemy_body_cls is None or cls_id in enemy_body_cls)
+                            color = (0, 0, 255) if is_enemy else (255, 180, 0)
+                            side = "CT" if cls_id in ct_body_cls else "T"
+                            label = f"{side}(c{cls_id}) {d['conf']:.0%}"
+                            d["_color"] = color; d["_label"] = label
+                            if enemy_body_cls is None or cls_id in enemy_body_cls:
+                                targets.append(d)
+                            if display is not None:
+                                cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                                cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        else:
+                            d["_role"] = "body"
+                            color = (0, 255, 0)
+                            label = f"c{cls_id} {d['conf']:.0%}"
+                            d["_color"] = color; d["_label"] = label
+                            targets.append(d)
+                            if display is not None:
+                                cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                                cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+                elif is_headbody_model and len(all_dets) > 0:
+                    # Geometric containment model (e.g. GO_头身): small box inside big box = head
+                    all_dets.sort(key=lambda d: d["area"], reverse=True)
+                    for i, d in enumerate(all_dets):
+                        d["_role"] = "body"
+                        dx, dy = d["mid_x"], d["mid_y"]
+                        for j in range(i):
+                            big = all_dets[j]
+                            bx1, by1, bx2, by2 = big["xyxy"]
+                            if bx1 <= dx <= bx2 and by1 <= dy <= by2 and d["area"] < big["area"] * 0.5:
+                                d["_role"] = "head"
+                                break
+                    for d in all_dets:
+                        if d["_role"] == "head":
+                            color = (0, 255, 255)
+                            label = f"HEAD(c{d['cls']}) {d['conf']:.0%}"
+                            d["_color"] = color; d["_label"] = label
+                            head_boxes.append(d)
+                            if display is not None:
+                                cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                                cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+                        else:
+                            color = (0, 0, 255)
+                            label = f"BODY(c{d['cls']}) {d['conf']:.0%}"
+                            d["_color"] = color; d["_label"] = label
+                            targets.append(d)
+                            if display is not None:
+                                cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                                cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                else:
+                    # Normal model (no 头身): use standard enemy filter
+                    for d in all_dets:
+                        is_enemy = (enemy_cls is None or d["cls"] in enemy_cls)
+                        if is_enemy:
+                            targets.append(d)
+                        if enemy_cls is None:
+                            color = (0, 255, 0)
+                        elif is_enemy:
+                            color = (0, 0, 255)
+                        else:
+                            color = (255, 180, 0)
+                        label = f"{'CT' if d['cls'] == 0 else 'T'} {d['conf']:.0%}"
+                        d["_color"] = color; d["_label"] = label
+                        if display is not None:
+                            cv2.rectangle(display, d["xyxy"][:2], d["xyxy"][2:], color, 2)
+                            cv2.putText(display, label, (d["xyxy"][0], max(20, d["xyxy"][1]-8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             # --- Aim assist ---
             cur_y_offset = self.crosshair_y_offset_var.get()
@@ -2488,7 +2653,8 @@ class VisionViewerApp:
                 fps = frame_count / (now - last_time)
                 frame_count = 0
                 last_time = now
-                self.root.after(0, self.status_var.set, f"运行中 | FPS: {fps:.1f} | 目标: {len(targets)}")
+                mode_tag = "找色" if use_color_mode else "AI"
+                self.root.after(0, self.status_var.set, f"运行中 [{mode_tag}] | FPS: {fps:.1f} | 目标: {len(targets)}")
 
             if do_render and display is not None and show_preview:
                 cv2.putText(display, f"{self.device_name} | FPS:{fps:.0f}", (8, 18),
