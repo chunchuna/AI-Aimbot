@@ -67,20 +67,32 @@ aaAdaptive = False
 aaAdaptiveMax = 3.0
 
 # Target lock: stick to nearest target, avoid multi-target pull/jitter
-aaTargetLock = False
+aaTargetLock = True
 # How many consecutive frames the locked target can be missing before switching
 aaTargetLockFrames = 8
 # Max pixel distance to consider same target between frames
 aaTargetLockRadius = 100
 
+# Predictive aim: aim at where the target WILL be, not where it IS
+aaPredict = True
+# Prediction strength: how many frames ahead to predict (0.1~2.0)
+# 0.5 = half frame, 1.0 = one full frame ahead, higher = more lead
+aaPredictStrength = 3.1
+
+# Directness: how much of the raw pixel offset to apply per frame
+# 0.0 = fully smoothed (old behavior, limited by amp/smooth)
+# 1.0 = raw 1:1 pixel snap (mouse moves exact offset to target each frame)
+# Recommended: 0.7~0.9 for moving targets (fast + slightly natural)
+aaDirectness = 0.0
+
 # Overlay customization
 ovBoxThickness = 1
 ovBoxStyle = "corners"
-ovCornerLen = 10
+ovCornerLen = 5
 ovDot = True
-ovDotColor = "red"          # "red", "green", "cyan", "white", "yellow", "magenta"
-ovHideLabel = False         # Hide CT/T label and confidence text on overlay
-ovDotSize = 4
+ovDotColor = "magenta"
+ovHideLabel = True
+ovDotSize = 2
 ovDotStyle = "diamond"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
@@ -90,7 +102,7 @@ aaFOV = 63
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -18
+crosshairYOffset = -21
 
 # Screen capture FPS (30-500)
 captureFPS = 266
@@ -113,6 +125,16 @@ recoilTimeOffset = 0
 # Default: 0x01 = Left mouse button (shooting key)
 # Set to match your fire key to avoid recoil during grenades etc.
 recoilKey = 1
+
+# Recoil only when aim key is held (prevents recoil during grenade throws etc.)
+recoilAimOnly = True
+
+# Recoil hold threshold in ms — minimum hold duration before recoil activates
+# Tap/click won't trigger. Recommended 50~150ms.
+recoilHoldMs = 100
+
+# Show overlay window (game-overlay style boxes/dots)
+showOverlay = True
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.

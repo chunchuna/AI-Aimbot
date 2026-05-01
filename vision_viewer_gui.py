@@ -683,8 +683,8 @@ class VisionViewerApp:
         self.aim_adaptive_var = tk.BooleanVar(value=_read_config_value("aaAdaptive", False, bool))
         self.aim_adaptive_max_var = tk.DoubleVar(value=_read_config_value("aaAdaptiveMax", 3.0, float))
 
-        self.visuals_var = tk.BooleanVar(value=True)
-        self.overlay_var = tk.BooleanVar(value=False)
+        self.visuals_var = tk.BooleanVar(value=_read_config_value("visuals", True, bool))
+        self.overlay_var = tk.BooleanVar(value=_read_config_value("showOverlay", False, bool))
         self._overlay = None  # OverlayWindow instance, created on demand
         # Overlay customization
         self.ov_box_thickness_var = tk.IntVar(value=_read_config_value("ovBoxThickness", 2, int))
@@ -699,6 +699,11 @@ class VisionViewerApp:
         self.aim_target_lock_var = tk.BooleanVar(value=_read_config_value("aaTargetLock", True, bool))
         self.aim_target_lock_frames_var = tk.IntVar(value=_read_config_value("aaTargetLockFrames", 8, int))
         self.aim_target_lock_radius_var = tk.IntVar(value=_read_config_value("aaTargetLockRadius", 100, int))
+        # Predictive aim: aim at predicted future position of moving targets
+        self.aim_predict_var = tk.BooleanVar(value=_read_config_value("aaPredict", False, bool))
+        self.aim_predict_strength_var = tk.DoubleVar(value=_read_config_value("aaPredictStrength", 0.5, float))
+        # Directness: 0.0 = fully smoothed (current behavior), 1.0 = raw 1:1 pixel offset (instant snap)
+        self.aim_directness_var = tk.DoubleVar(value=_read_config_value("aaDirectness", 0.0, float))
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
         self.screenshot_size_var = tk.IntVar(value=_read_config_value("screenShotHeight", 320, int))
@@ -860,29 +865,48 @@ class VisionViewerApp:
         ttk.Label(bottom, textvariable=self.device_var).pack(side=tk.LEFT)
         ttk.Label(bottom, textvariable=self.status_var).pack(side=tk.RIGHT)
 
-        # ===== RIGHT: config panel =====
-        right = ttk.Frame(pw, padding=8)
-        pw.add(right, weight=1)
+        # ===== RIGHT: config panel as Notebook with 5 tabs =====
+        right_pane = ttk.Frame(pw, padding=4)
+        pw.add(right_pane, weight=1)
 
-        # Use a scrollable canvas for the right panel to fit all controls
-        canvas = tk.Canvas(right, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(right, orient="vertical", command=canvas.yview)
-        scroll_frame = ttk.Frame(canvas)
-        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        # CRITICAL: Disable MouseWheel on all Combobox widgets.
+        # CRITICAL: Disable MouseWheel on all Combobox widgets globally.
         # readonly TCombobox responds to MouseWheel by cycling through values,
         # which silently corrupts settings when the user scrolls the panel.
         self.root.unbind_class("TCombobox", "<MouseWheel>")
-        # Re-point 'right' to the scrollable inner frame
-        right = scroll_frame
+
+        notebook = ttk.Notebook(right_pane)
+        notebook.pack(fill="both", expand=True)
+
+        def _make_scrollable_tab(title):
+            """Create a scrollable tab inside the notebook. Returns the inner frame."""
+            tab = ttk.Frame(notebook, padding=4)
+            notebook.add(tab, text=title)
+            canvas_w = tk.Canvas(tab, highlightthickness=0)
+            sb = ttk.Scrollbar(tab, orient="vertical", command=canvas_w.yview)
+            inner = ttk.Frame(canvas_w)
+            inner.bind("<Configure>", lambda e: canvas_w.configure(scrollregion=canvas_w.bbox("all")))
+            cw_id = canvas_w.create_window((0, 0), window=inner, anchor="nw")
+            # Make inner frame fill canvas width when canvas resizes
+            canvas_w.bind("<Configure>", lambda e, cid=cw_id, cv=canvas_w: cv.itemconfig(cid, width=e.width))
+            canvas_w.configure(yscrollcommand=sb.set)
+            canvas_w.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            # Mouse wheel: only when cursor is over THIS tab's canvas
+            def _on_wheel(e, cv=canvas_w):
+                cv.yview_scroll(int(-1*(e.delta/120)), "units")
+            canvas_w.bind("<Enter>", lambda e, cv=canvas_w, fn=_on_wheel: cv.bind_all("<MouseWheel>", fn))
+            canvas_w.bind("<Leave>", lambda e: canvas_w.unbind_all("<MouseWheel>"))
+            return inner
+
+        # Create 5 tabs (order matters: aim is most-used so it's first)
+        tab_aim    = _make_scrollable_tab("瞄准")
+        tab_detect = _make_scrollable_tab("识别")
+        tab_combat = _make_scrollable_tab("压枪/扳机")
+        tab_visual = _make_scrollable_tab("外观")
+        tab_system = _make_scrollable_tab("系统")
+
+        # `right` is the current build target — start with system tab for profile section
+        right = tab_system
 
         # ===== Profile selector =====
         ttk.Label(right, text="── 配置方案 ──", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(0, 2))
@@ -900,9 +924,10 @@ class VisionViewerApp:
         ttk.Button(prof_btn_frame, text="删除方案", command=self._delete_profile).pack(side="left", padx=(0, 4))
         ttk.Button(prof_btn_frame, text="重命名", command=self._rename_profile).pack(side="left")
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+        # ===== Switch to DETECT tab =====
+        right = tab_detect
 
-        ttk.Label(right, text="自瞄设置", font=("Microsoft YaHei UI", 12, "bold")).pack(pady=(0, 8), fill="x")
+        ttk.Label(right, text="识别设置", font=("Microsoft YaHei UI", 12, "bold")).pack(pady=(0, 8), fill="x")
 
         # --- Model selector ---
         ttk.Label(right, text="检测模型:", font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
@@ -922,7 +947,8 @@ class VisionViewerApp:
         self._class_filter_frame.pack(fill="x", pady=(2, 0))
         ttk.Label(self._class_filter_frame, text="(加载模型后自动显示)", foreground="gray").pack(anchor="w")
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+        # ===== Switch to AIM tab =====
+        right = tab_aim
 
         # --- Status display ---
         status_frame = ttk.Frame(right)
@@ -946,6 +972,10 @@ class VisionViewerApp:
                          command=self._update_status_labels).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="启用扳机", variable=self.trigger_enabled_var,
                          command=self._update_status_labels).pack(anchor="w", pady=2)
+        # ===== Switch to VISUAL tab =====
+        right = tab_visual
+
+        ttk.Label(right, text="外观设置", font=("Microsoft YaHei UI", 12, "bold")).pack(pady=(0, 8), fill="x")
         ttk.Checkbutton(right, text="显示预览窗口", variable=self.visuals_var).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="屏幕叠加层 (Overlay)", variable=self.overlay_var).pack(anchor="w", pady=2)
 
@@ -996,7 +1026,8 @@ class VisionViewerApp:
         tk.Scale(ov_frame, from_=2, to=12, orient="horizontal", variable=self.ov_dot_size_var,
                  command=lambda v: self.ov_dot_size_label.configure(text=str(int(float(v))))).pack(fill="x")
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=4)
+        # ===== Switch back to AIM tab =====
+        right = tab_aim
 
         # --- Target lock (anti-pull) ---
         ttk.Checkbutton(right, text="目标锁定 (避免多目标拉扯)", variable=self.aim_target_lock_var).pack(anchor="w", pady=2)
@@ -1015,6 +1046,25 @@ class VisionViewerApp:
         tk.Scale(right, from_=30, to=200, orient="horizontal", variable=self.aim_target_lock_radius_var,
                  command=lambda v: self.tl_radius_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="帧间目标匹配距离 越大容忍快速移动", font=("", 8)).pack(anchor="w")
+
+        # --- Predictive aim ---
+        ttk.Checkbutton(right, text="预测瞄准 (预判移动目标位置)", variable=self.aim_predict_var).pack(anchor="w", pady=2)
+        f_ps = ttk.Frame(right); f_ps.pack(fill="x", pady=1)
+        ttk.Label(f_ps, text="预判强度:").pack(side="left")
+        self.predict_str_label = ttk.Label(f_ps, text=f"{self.aim_predict_strength_var.get():.2f}")
+        self.predict_str_label.pack(side="right")
+        tk.Scale(right, from_=0.0, to=4.0, orient="horizontal", variable=self.aim_predict_strength_var,
+                 resolution=0.1, command=lambda v: self.predict_str_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+        ttk.Label(right, text="前瞻时间 1.0=50ms 2.0=100ms 3.0=150ms 推荐1.0~2.0", font=("", 8)).pack(anchor="w")
+
+        # --- Directness ---
+        f_dir = ttk.Frame(right); f_dir.pack(fill="x", pady=1)
+        ttk.Label(f_dir, text="直接度:").pack(side="left")
+        self.directness_label = ttk.Label(f_dir, text=f"{int(self.aim_directness_var.get()*100)}%")
+        self.directness_label.pack(side="right")
+        tk.Scale(right, from_=0.0, to=1.0, orient="horizontal", variable=self.aim_directness_var,
+                 resolution=0.05, command=lambda v: self.directness_label.configure(text=f"{int(float(v)*100)}%")).pack(fill="x")
+        ttk.Label(right, text="需开启预测 降低平滑提高响应速度 0%=原始平滑 100%=无平滑", font=("", 8)).pack(anchor="w")
 
         # Start a periodic status label updater (catches hotkey toggles too)
         self._update_status_labels()
@@ -1140,7 +1190,10 @@ class VisionViewerApp:
                  resolution=32, command=lambda v: self.ss_label.configure(text=f"{int(float(v))}x{int(float(v))}")).pack(fill="x")
         ttk.Label(right, text="重启捕获后生效  越大看越远但推理越慢", font=("", 8)).pack(anchor="w")
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+        # ===== Switch to COMBAT tab =====
+        right = tab_combat
+
+        ttk.Label(right, text="压枪 / 扳机 / 背闪", font=("Microsoft YaHei UI", 12, "bold")).pack(pady=(0, 8), fill="x")
 
         # --- Recoil Compensation ---
         ttk.Label(right, text="── 压枪补偿 ──", font=("", 9, "bold")).pack(anchor="w", pady=(4, 2))
@@ -1295,6 +1348,9 @@ class VisionViewerApp:
                  resolution=0.05, command=lambda v: self.antiflash_conf_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
         ttk.Label(right, text="需要模型类别含\"闪\"字, 使用CS2灵敏度计算转身", font=("", 8)).pack(anchor="w")
 
+        # ===== Switch to DETECT tab (color section) =====
+        right = tab_detect
+
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # --- Color detection mode (找色模式) ---
@@ -1349,6 +1405,9 @@ class VisionViewerApp:
         tk.Scale(right, from_=5, to=500, orient="horizontal", variable=self.color_min_area_var,
                  resolution=5, command=lambda v: self.color_area_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="平滑=鼠标跟随速度 面积=过滤小噪点", font=("", 8)).pack(anchor="w")
+
+        # ===== Switch to SYSTEM tab =====
+        right = tab_system
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
@@ -1663,6 +1722,9 @@ class VisionViewerApp:
             "aaTargetLock": self.aim_target_lock_var.get(),
             "aaTargetLockFrames": self.aim_target_lock_frames_var.get(),
             "aaTargetLockRadius": self.aim_target_lock_radius_var.get(),
+            "aaPredict": self.aim_predict_var.get(),
+            "aaPredictStrength": round(self.aim_predict_strength_var.get(), 2),
+            "aaDirectness": round(self.aim_directness_var.get(), 2),
             "ovBoxThickness": self.ov_box_thickness_var.get(),
             "ovBoxStyle": self.ov_box_style_var.get(),
             "ovCornerLen": self.ov_corner_len_var.get(),
@@ -1687,6 +1749,10 @@ class VisionViewerApp:
             "recoilSmooth": self.recoil_smooth_var.get(),
             "recoilTimeOffset": self.recoil_time_offset_var.get(),
             "recoilKey": KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01),
+            "recoilAimOnly": self.recoil_aim_only_var.get(),
+            "recoilHoldMs": self.recoil_hold_ms_var.get(),
+            "visuals": self.visuals_var.get(),
+            "showOverlay": self.overlay_var.get(),
             "aaTeamFilter": TEAM_OPTIONS.get(self.team_var.get(), "all"),
             "aimToggleKey": HOTKEY_OPTIONS.get(self.aim_toggle_key_var.get(), 0x74),
             "recoilToggleKey": HOTKEY_OPTIONS.get(self.recoil_toggle_key_var.get(), 0x75),
@@ -1748,6 +1814,12 @@ class VisionViewerApp:
             self.aim_target_lock_frames_var.set(int(vals["aaTargetLockFrames"]))
         if "aaTargetLockRadius" in vals:
             self.aim_target_lock_radius_var.set(int(vals["aaTargetLockRadius"]))
+        if "aaPredict" in vals:
+            self.aim_predict_var.set(bool(vals["aaPredict"]))
+        if "aaPredictStrength" in vals:
+            self.aim_predict_strength_var.set(float(vals["aaPredictStrength"]))
+        if "aaDirectness" in vals:
+            self.aim_directness_var.set(float(vals["aaDirectness"]))
         if "ovBoxThickness" in vals:
             self.ov_box_thickness_var.set(int(vals["ovBoxThickness"]))
         if "ovBoxStyle" in vals:
@@ -1796,6 +1868,14 @@ class VisionViewerApp:
             self.recoil_time_offset_var.set(int(vals["recoilTimeOffset"]))
         if "recoilKey" in vals:
             self.recoil_key_var.set(KEY_CODE_TO_NAME.get(int(vals["recoilKey"]), "鼠标左键 (Left Click)"))
+        if "recoilAimOnly" in vals:
+            self.recoil_aim_only_var.set(bool(vals["recoilAimOnly"]))
+        if "recoilHoldMs" in vals:
+            self.recoil_hold_ms_var.set(int(vals["recoilHoldMs"]))
+        if "visuals" in vals:
+            self.visuals_var.set(bool(vals["visuals"]))
+        if "showOverlay" in vals:
+            self.overlay_var.set(bool(vals["showOverlay"]))
         if "aaTeamFilter" in vals:
             v = vals["aaTeamFilter"]
             self.team_var.set(TEAM_VALUE_TO_NAME.get(v, "全部目标 (All)"))
@@ -2430,11 +2510,17 @@ class VisionViewerApp:
         aim_key_press_time = 0.0   # When aim key was first pressed
         prev_aim_key = False       # Previous frame's aim key state
 
-        # Adaptive aim: target velocity tracking
-        prev_target_x = 0.0
-        prev_target_y = 0.0
-        prev_target_time = 0.0
-        target_velocity = 0.0      # smoothed pixels/sec
+        # Predictive aim: sliding window of (timestamp, x, y) for linear velocity
+        pred_history = deque(maxlen=8)  # last 8 detections (~30ms at 266fps)
+        pred_smooth_x = None  # light EMA on raw position to remove pixel jitter
+        pred_smooth_y = None
+        pred_vx = 0.0         # velocity X (capture px/sec)
+        pred_vy = 0.0         # velocity Y (capture px/sec)
+        # Track recent mouse commands to compensate self-induced motion in velocity estimate
+        # When we move the mouse, the camera rotates → target appears to shift in capture.
+        # This contaminates the velocity estimate. Subtracting our own commands recovers
+        # the target's TRUE screen-space motion.
+        mouse_cmd_history = deque(maxlen=40)  # (timestamp, dx, dy) recent mouse counts sent
 
         # Target lock: stick to one target to avoid multi-target pull
         locked_target_pos = None    # (mid_x, mid_y) of locked target
@@ -2998,6 +3084,93 @@ class VisionViewerApp:
                         aim_y_abs = y1_box + box_h * 0.08
                         aim_x_abs = x1_box + box_w * 0.5
 
+                    # --- Predictive aim: sliding-window velocity + time lookahead ---
+                    if self.aim_predict_var.get():
+                        now_pred = time.perf_counter()
+                        # Step 1: Light EMA on raw aim point to kill pixel jitter only
+                        # alpha=0.5 = light filtering, preserves response speed
+                        pos_alpha = 0.5
+                        if pred_smooth_x is None:
+                            pred_smooth_x = aim_x_abs
+                            pred_smooth_y = aim_y_abs
+                        else:
+                            pred_smooth_x += pos_alpha * (aim_x_abs - pred_smooth_x)
+                            pred_smooth_y += pos_alpha * (aim_y_abs - pred_smooth_y)
+
+                        # Step 2: Sliding-window velocity (window endpoint diff)
+                        # This avoids EMA's velocity underestimate and noise amplification.
+                        pred_history.append((now_pred, pred_smooth_x, pred_smooth_y))
+                        if len(pred_history) >= 4:
+                            t0, x0, y0 = pred_history[0]
+                            tN, xN, yN = pred_history[-1]
+                            window_dt = tN - t0
+                            if window_dt > 0.005:
+                                # Self-motion compensation: when we move the mouse, the
+                                # camera rotates and target appears to shift in capture.
+                                # Sum our mouse commands whose effect "landed" in the window.
+                                # Assume detection+action delay ~25ms, so command sent at time
+                                # t landed at t+0.025. Count if t+0.025 is in [t0, tN].
+                                MOUSE_DELAY = 0.025
+                                self_mx = 0.0
+                                self_my = 0.0
+                                for mt, mdx, mdy in mouse_cmd_history:
+                                    eff_t = mt + MOUSE_DELAY
+                                    if t0 <= eff_t <= tN:
+                                        self_mx += mdx
+                                        self_my += mdy
+                                # K_est = estimated capture_px per mouse_count.
+                                # Assuming user's amp/smooth are approximately calibrated,
+                                # effective loop gain amp*K/smooth ≈ 0.3~0.5 (typical stable).
+                                # So K ≈ 0.4 * smooth / amp. Use conservative 0.5 factor.
+                                K_est = max(cur_smooth, 1.0) / max(cur_amp, 0.1) * 0.5
+                                # Adjust position diff: add back self-motion effect
+                                # (we moved +D counts → target shifted -D*K in capture → add +D*K to recover)
+                                adj_dx = (xN - x0) + self_mx * K_est
+                                adj_dy = (yN - y0) + self_my * K_est
+                                new_vx = adj_dx / window_dt
+                                new_vy = adj_dy / window_dt
+                                # Light EMA on velocity to suppress remaining noise
+                                vel_alpha = 0.5
+                                pred_vx += vel_alpha * (new_vx - pred_vx)
+                                pred_vy += vel_alpha * (new_vy - pred_vy)
+
+                                # Emergency-stop detection: if last 3 positions are
+                                # clustered (target has stopped), snap velocity to 0
+                                # immediately. Without this, the 8-frame window keeps
+                                # reporting old movement → "can't brake" overshoot.
+                                if len(pred_history) >= 3:
+                                    recent = list(pred_history)[-3:]
+                                    rxs = [p[1] for p in recent]
+                                    rys = [p[2] for p in recent]
+                                    # Subtract our own mouse motion from spread too,
+                                    # else moving the crosshair causes false "still moving" signal.
+                                    spread_x = max(rxs) - min(rxs)
+                                    spread_y = max(rys) - min(rys)
+                                    if spread_x < 2.5 and spread_y < 2.5:
+                                        pred_vx = 0.0
+                                        pred_vy = 0.0
+
+                        # Step 3: Time-based lookahead (covers detection delay + P-lag)
+                        # strength=1.0 → 50ms ahead, max 3.0 → 150ms
+                        strength = self.aim_predict_strength_var.get()
+                        lookahead_sec = strength * 0.05
+                        pred_dx = pred_vx * lookahead_sec
+                        pred_dy = pred_vy * lookahead_sec
+                        # Safety clamp
+                        pred_len = (pred_dx**2 + pred_dy**2) ** 0.5
+                        if pred_len > 100.0:
+                            s = 100.0 / pred_len
+                            pred_dx *= s
+                            pred_dy *= s
+                        # Final aim point = smoothed position + prediction offset
+                        aim_x_abs = pred_smooth_x + pred_dx
+                        aim_y_abs = pred_smooth_y + pred_dy
+                    else:
+                        pred_smooth_x = None
+                        pred_history.clear()
+                        pred_vx = 0.0
+                        pred_vy = 0.0
+
                     # --- Unified aim offset ---
                     # Raw pixel offset from screen center to aim point
                     rawX = aim_x_abs - cWidth
@@ -3071,6 +3244,7 @@ class VisionViewerApp:
 
                         if keyDown and (mX != 0 or mY != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
+                            mouse_cmd_history.append((time.perf_counter(), mX, mY))
                             if now_t - aim_log_timer > 1:
                                 print(f"[ASSIST] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} pull={pull_pct:.0%} move=({mX},{mY})")
                                 aim_log_timer = now_t
@@ -3089,8 +3263,16 @@ class VisionViewerApp:
                         elif lerp_spraying:
                             rawY = 0.0
 
-                        # Osiris-style smoothing: offset / smooth
-                        smooth_div = max(cur_smooth, 1.0)
+                        # Directness: when prediction is active and aim point is
+                        # externally smoothed, we can safely reduce the smooth divisor
+                        # for faster convergence. directness 0→1 lerps smooth from
+                        # user value toward 1.0 (instant).
+                        directness = self.aim_directness_var.get()
+                        if directness > 0.001 and self.aim_predict_var.get():
+                            effective_smooth = cur_smooth + directness * (1.0 - cur_smooth)
+                        else:
+                            effective_smooth = cur_smooth
+                        smooth_div = max(effective_smooth, 1.0)
                         moveX = rawX * cur_amp / smooth_div
                         moveY = rawY * cur_amp / smooth_div
 
@@ -3109,6 +3291,7 @@ class VisionViewerApp:
 
                         if keyDown and (mX != 0 or mY != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
+                            mouse_cmd_history.append((time.perf_counter(), mX, mY))
                             if now_t - aim_log_timer > 1:
                                 print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) recoil_off=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
                                 aim_log_timer = now_t
@@ -3192,6 +3375,7 @@ class VisionViewerApp:
                     rc_my = round(recoil_current_y - recoil_accum_y)
                     if win32api is not None and (rc_mx != 0 or rc_my != 0):
                         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
+                        mouse_cmd_history.append((time.perf_counter(), rc_mx, rc_my))
                     recoil_accum_x += rc_mx
                     recoil_accum_y += rc_my
 
