@@ -54,7 +54,7 @@ aaXOnly = True
 # X-lock duration in ms: when aaXOnly is on, keep full X+Y lock for this many ms first
 # After this duration, release Y-axis to player for manual recoil control
 # 0 = always X-only (no initial lock), 200 = lock head for 200ms then release Y
-aaXLockDuration = 200
+aaXLockDuration = 450
 
 # Always-aim: always track targets without needing to hold aim key
 aaAlwaysAim = False
@@ -74,10 +74,10 @@ aaTargetLockFrames = 8
 aaTargetLockRadius = 100
 
 # Predictive aim: aim at where the target WILL be, not where it IS
-aaPredict = True
+aaPredict = False
 # Prediction strength: how many frames ahead to predict (0.1~2.0)
 # 0.5 = half frame, 1.0 = one full frame ahead, higher = more lead
-aaPredictStrength = 3.1
+aaPredictStrength = 0.2
 
 # Directness: how much of the raw pixel offset to apply per frame
 # 0.0 = fully smoothed (old behavior, limited by amp/smooth)
@@ -97,7 +97,7 @@ ovDotStyle = "diamond"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 3.8
+aaSmoothFactor = 2.6
 aaFOV = 63
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair

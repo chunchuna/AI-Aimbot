@@ -826,7 +826,6 @@ class VisionViewerApp:
         self._class_filter_frame = None       # ttk.Frame holding checkboxes, rebuilt on model load
 
         self._build_ui()
-        self.refresh_windows()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -842,23 +841,10 @@ class VisionViewerApp:
         top_frame.pack(fill=tk.X)
         ttk.Button(top_frame, text="▶ 全屏启动", command=self.start_viewer_fullscreen).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(top_frame, text="停止", command=self.stop_viewer).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(top_frame, text="或选择窗口:").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Button(top_frame, text="刷新", command=self.refresh_windows).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(top_frame, text="窗口启动", command=self.start_viewer).pack(side=tk.RIGHT, padx=4)
 
-        columns = ("index", "title", "process", "pid", "size")
-        self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="browse")
-        self.tree.heading("index", text="#")
-        self.tree.heading("title", text="窗口标题")
-        self.tree.heading("process", text="进程")
-        self.tree.heading("pid", text="PID")
-        self.tree.heading("size", text="尺寸")
-        self.tree.column("index", width=36, anchor=tk.CENTER)
-        self.tree.column("title", width=320)
-        self.tree.column("process", width=120)
-        self.tree.column("pid", width=60, anchor=tk.CENTER)
-        self.tree.column("size", width=80, anchor=tk.CENTER)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        # Placeholder for preview area (empty when not running)
+        self._preview_frame = ttk.Frame(left)
+        self._preview_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
 
         bottom = ttk.Frame(left, padding=(8, 0, 8, 8))
         bottom.pack(fill=tk.X)
@@ -2079,43 +2065,12 @@ class VisionViewerApp:
         self.color_s_high_var.set(preset["upper"][1])
         self.color_v_high_var.set(preset["upper"][2])
 
-    # ------------------------------------------------------- window list
+    # ------------------------------------------------------- window list (legacy stubs)
     def refresh_windows(self):
-        if self.running:
-            messagebox.showinfo("运行中", "请先停止再刷新窗口列表。")
-            return
-        self.tree.delete(*self.tree.get_children())
-        self.windows = []
-        for window in pygetwindow.getAllWindows():
-            title = window.title.strip()
-            if not title or window.width <= 0 or window.height <= 0:
-                continue
-            hwnd = getattr(window, "_hWnd", None)
-            pid = "?"
-            proc = "?"
-            if hwnd:
-                try:
-                    _, pv = win32process.GetWindowThreadProcessId(hwnd)
-                    pid = str(pv)
-                    if psutil:
-                        proc = psutil.Process(pv).name()
-                except Exception:
-                    pass
-            item = {"window": window, "title": title, "process": proc, "pid": pid,
-                    "size": f"{window.width}x{window.height}"}
-            self.windows.append(item)
-            self.tree.insert("", tk.END, values=(len(self.windows)-1, title, proc, pid, item["size"]))
-        self.status_var.set(f"找到 {len(self.windows)} 个窗口")
+        pass
 
     def get_selected_window(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showwarning("未选择", "请先选择一个窗口。")
-            return None
-        idx = int(self.tree.item(sel[0], "values")[0])
-        if idx < 0 or idx >= len(self.windows):
-            return None
-        return self.windows[idx]["window"]
+        return None
 
     # --------------------------------------------------------- model
     def _get_selected_model_path(self):
