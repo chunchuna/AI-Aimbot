@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 1.55
+aaMovementAmp = 0.9
 
 # Person Class Confidence
 confidence = 0.3
@@ -57,7 +57,7 @@ aaXOnly = True
 aaXLockDuration = 200
 
 # Always-aim: always track targets without needing to hold aim key
-aaAlwaysAim = True
+aaAlwaysAim = False
 
 # Adaptive aim: dynamically boost movement amp when target is moving fast
 # Keeps static aim smooth while tracking moving targets aggressively
@@ -67,20 +67,21 @@ aaAdaptive = False
 aaAdaptiveMax = 3.0
 
 # Target lock: stick to nearest target, avoid multi-target pull/jitter
-aaTargetLock = True
+aaTargetLock = False
 # How many consecutive frames the locked target can be missing before switching
 aaTargetLockFrames = 8
 # Max pixel distance to consider same target between frames
 aaTargetLockRadius = 100
 
 # Overlay customization
-ovBoxThickness = 2          # Bounding box line thickness (1-6)
-ovBoxStyle = "full"         # "full" = complete rectangle, "corners" = corner brackets only
-ovCornerLen = 15            # Corner bracket length (for corners style)
-ovDot = False               # Draw aim point dot on overlay
-ovDotSize = 4               # Aim dot radius in pixels (2-12)
-ovDotStyle = "circle"       # "circle", "cross", or "diamond"
+ovBoxThickness = 1
+ovBoxStyle = "corners"
+ovCornerLen = 10
+ovDot = True
 ovDotColor = "red"          # "red", "green", "cyan", "white", "yellow", "magenta"
+ovHideLabel = False         # Hide CT/T label and confidence text on overlay
+ovDotSize = 4
+ovDotStyle = "diamond"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement

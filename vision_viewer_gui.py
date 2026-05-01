@@ -241,7 +241,7 @@ class OverlayWindow:
 
     def draw(self, detections, capture_region=None, box_thickness=2,
              box_style="full", corner_len=15, show_dot=False, dot_size=4,
-             dot_style="circle", dot_color="red"):
+             dot_style="circle", dot_color="red", hide_label=False):
         """Draw detection boxes using UpdateLayeredWindow (per-pixel alpha).
         detections: list of dicts with 'xyxy', optional '_color', '_label', '_aim_x', '_aim_y'
         capture_region: (left, top, right, bottom) of the captured screen region
@@ -357,7 +357,7 @@ class OverlayWindow:
 
             # Draw label text using GDI on mem_dc (supports Unicode)
             label = d.get("_label", "")
-            if label:
+            if label and not hide_label:
                 cr = r | (g << 8) | (b << 16)
                 gdi32.SetTextColor(mem_dc, cr)
                 gdi32.SetBkMode(mem_dc, 1)  # TRANSPARENT background
@@ -694,6 +694,7 @@ class VisionViewerApp:
         self.ov_dot_size_var = tk.IntVar(value=_read_config_value("ovDotSize", 4, int))
         self.ov_dot_style_var = tk.StringVar(value=_read_config_value("ovDotStyle", "circle", str))  # circle / cross / diamond
         self.ov_dot_color_var = tk.StringVar(value=_read_config_value("ovDotColor", "red", str))  # red / green / cyan / white / yellow
+        self.ov_hide_label_var = tk.BooleanVar(value=_read_config_value("ovHideLabel", False, bool))
         # Target lock: lock nearest target, ignore others
         self.aim_target_lock_var = tk.BooleanVar(value=_read_config_value("aaTargetLock", True, bool))
         self.aim_target_lock_frames_var = tk.IntVar(value=_read_config_value("aaTargetLockFrames", 8, int))
@@ -971,6 +972,8 @@ class VisionViewerApp:
         tk.Scale(ov_frame, from_=5, to=40, orient="horizontal", variable=self.ov_corner_len_var,
                  command=lambda v: self.ov_corner_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(ov_frame, text="corners模式下转角线段长度", font=("", 8)).pack(anchor="w")
+
+        ttk.Checkbutton(ov_frame, text="隐藏标签文字 (CT/T 和置信度)", variable=self.ov_hide_label_var).pack(anchor="w", pady=1)
 
         ttk.Separator(ov_frame, orient="horizontal").pack(fill="x", pady=3)
 
@@ -1667,6 +1670,7 @@ class VisionViewerApp:
             "ovDotSize": self.ov_dot_size_var.get(),
             "ovDotStyle": self.ov_dot_style_var.get(),
             "ovDotColor": self.ov_dot_color_var.get(),
+            "ovHideLabel": self.ov_hide_label_var.get(),
             "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -1758,6 +1762,8 @@ class VisionViewerApp:
             self.ov_dot_style_var.set(str(vals["ovDotStyle"]))
         if "ovDotColor" in vals:
             self.ov_dot_color_var.set(str(vals["ovDotColor"]))
+        if "ovHideLabel" in vals:
+            self.ov_hide_label_var.set(bool(vals["ovHideLabel"]))
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
@@ -3271,7 +3277,8 @@ class VisionViewerApp:
                                    show_dot=self.ov_dot_var.get(),
                                    dot_size=self.ov_dot_size_var.get(),
                                    dot_style=self.ov_dot_style_var.get(),
-                                   dot_color=self.ov_dot_color_var.get())
+                                   dot_color=self.ov_dot_color_var.get(),
+                                   hide_label=self.ov_hide_label_var.get())
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 
