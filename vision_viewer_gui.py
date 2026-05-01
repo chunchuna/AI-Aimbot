@@ -609,6 +609,9 @@ class VisionViewerApp:
         self.aim_x_lock_duration_var = tk.IntVar(value=_read_config_value("aaXLockDuration", 0, int))
         # Always-aim: no need to hold aim key
         self.aim_always_var = tk.BooleanVar(value=_read_config_value("aaAlwaysAim", False, bool))
+        # Adaptive aim: dynamically boost amp when target moves fast
+        self.aim_adaptive_var = tk.BooleanVar(value=_read_config_value("aaAdaptive", False, bool))
+        self.aim_adaptive_max_var = tk.DoubleVar(value=_read_config_value("aaAdaptiveMax", 3.0, float))
 
         self.visuals_var = tk.BooleanVar(value=True)
         self.overlay_var = tk.BooleanVar(value=False)
@@ -941,6 +944,16 @@ class VisionViewerApp:
         self.amp_label.pack(side="right")
         tk.Scale(right, from_=0.1, to=2.0, orient="horizontal", variable=self.amp_var,
                  resolution=0.05, command=lambda v: self.amp_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
+
+        # Adaptive aim
+        ttk.Checkbutton(right, text="自适应倍率 (目标移动时自动加速追踪)", variable=self.aim_adaptive_var).pack(anchor="w", pady=2)
+        f_adapt = ttk.Frame(right); f_adapt.pack(fill="x", pady=2)
+        ttk.Label(f_adapt, text="最大加速倍数:").pack(side="left")
+        self.adaptive_max_label = ttk.Label(f_adapt, text=f"{self.aim_adaptive_max_var.get():.1f}")
+        self.adaptive_max_label.pack(side="right")
+        tk.Scale(right, from_=1.5, to=5.0, orient="horizontal", variable=self.aim_adaptive_max_var,
+                 resolution=0.5, command=lambda v: self.adaptive_max_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
+        ttk.Label(right, text="静态用基础倍率 移动时最高放大到此倍数", font=("", 8)).pack(anchor="w")
 
         # Confidence
         f6 = ttk.Frame(right); f6.pack(fill="x", pady=2)
@@ -1495,6 +1508,8 @@ class VisionViewerApp:
             "aaXOnly": self.aim_x_only_var.get(),
             "aaXLockDuration": self.aim_x_lock_duration_var.get(),
             "aaAlwaysAim": self.aim_always_var.get(),
+            "aaAdaptive": self.aim_adaptive_var.get(),
+            "aaAdaptiveMax": round(self.aim_adaptive_max_var.get(), 1),
             "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -1562,6 +1577,10 @@ class VisionViewerApp:
             self.aim_x_lock_duration_var.set(int(vals["aaXLockDuration"]))
         if "aaAlwaysAim" in vals:
             self.aim_always_var.set(bool(vals["aaAlwaysAim"]))
+        if "aaAdaptive" in vals:
+            self.aim_adaptive_var.set(bool(vals["aaAdaptive"]))
+        if "aaAdaptiveMax" in vals:
+            self.aim_adaptive_max_var.set(float(vals["aaAdaptiveMax"]))
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
@@ -2228,6 +2247,12 @@ class VisionViewerApp:
         aim_key_press_time = 0.0   # When aim key was first pressed
         prev_aim_key = False       # Previous frame's aim key state
 
+        # Adaptive aim: target velocity tracking
+        prev_target_x = 0.0
+        prev_target_y = 0.0
+        prev_target_time = 0.0
+        target_velocity = 0.0      # smoothed pixels/sec
+
         # Triggerbot state
         trigger_on_target_since = 0.0  # timestamp when crosshair first entered a target box
         trigger_fired = False          # whether we already fired for this "on-target" episode
@@ -2748,6 +2773,23 @@ class VisionViewerApp:
                     # Raw pixel offset from screen center to aim point
                     rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
+
+                    # --- Adaptive aim: boost amp AND reduce smooth when not on target ---
+                    # Key insight: moveX = rawX * amp / smooth, so both matter.
+                    # Only boosting amp is not enough — smooth is the real speed limiter.
+                    # When off-target: amp goes UP, smooth goes DOWN → multiplicative speedup.
+                    # When on-target: both return to user's base values → smooth & stable.
+                    if self.aim_adaptive_var.get():
+                        cur_raw_dist = (rawX**2 + rawY**2) ** 0.5
+                        on_target_px = 5.0     # within 5px = "on target", use base values
+                        full_boost_px = 50.0   # beyond 50px = full boost
+                        if cur_raw_dist > on_target_px:
+                            boost_frac = min((cur_raw_dist - on_target_px) / (full_boost_px - on_target_px), 1.0)
+                            adaptive_max = self.aim_adaptive_max_var.get()
+                            # Boost amp: base → base * max
+                            cur_amp = cur_amp * (1.0 + boost_frac * (adaptive_max - 1.0))
+                            # Reduce smooth: lerp from user value toward 1.0 (instant)
+                            cur_smooth = cur_smooth + boost_frac * (1.0 - cur_smooth)
 
                     # X-only aim lock: suppress Y-axis, let player control vertical manually
                     # With lock duration: keep full X+Y for first N ms, then release Y

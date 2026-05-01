@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 0.5
+aaMovementAmp = 1.55
 
 # Person Class Confidence
 confidence = 0.3
@@ -49,22 +49,26 @@ aaTeamFilter = "all"
 aaAimMode = "aimbot"
 
 # X-axis only aim lock (True = only track horizontal, Y-axis left to player for manual recoil)
-aaXOnly = False
+aaXOnly = True
 
 # X-lock duration in ms: when aaXOnly is on, keep full X+Y lock for this many ms first
 # After this duration, release Y-axis to player for manual recoil control
 # 0 = always X-only (no initial lock), 200 = lock head for 200ms then release Y
-aaXLockDuration = 0
+aaXLockDuration = 200
 
 # Always-aim: always track targets without needing to hold aim key
-aaAlwaysAim = False
+aaAlwaysAim = True
+
+# Adaptive aim: dynamically boost movement amp when target is moving fast
+# Keeps static aim smooth while tracking moving targets aggressively
+aaAdaptive = False
+# Maximum boost multiplier for adaptive aim (1.5~5.0)
+# e.g. 3.0 means amp can go up to 3x base value when target moves fast
+aaAdaptiveMax = 3.0
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.0
-
-# Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
-# Set to 0 to disable FOV limit (aim at any target on screen)
+aaSmoothFactor = 3.8
 aaFOV = 63
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
