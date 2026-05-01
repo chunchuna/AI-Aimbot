@@ -335,7 +335,7 @@ class OverlayWindow:
             user32.DestroyWindow(self._hwnd)
             self._hwnd = None
 
-from config import confidence as _conf_default, screenShotHeight, screenShotWidth
+from config import confidence as _conf_default
 from recoil_patterns import (WEAPON_NAMES, get_recoil_offset, get_bullet_delta, get_fire_interval_ms, get_mag_size,
                               RIGID_WEAPON_NAMES, get_rigid_weapon_data)
 
@@ -603,11 +603,15 @@ class VisionViewerApp:
         cur_key2 = _read_config_hex("aaSecondaryKey", 0x00)
         self.key2_var.set(KEY2_CODE_TO_NAME.get(cur_key2, "禁用 (Off)"))
 
+        # X-axis only aim lock (Y-axis left to player for manual recoil control)
+        self.aim_x_only_var = tk.BooleanVar(value=_read_config_value("aaXOnly", False, bool))
+
         self.visuals_var = tk.BooleanVar(value=True)
         self.overlay_var = tk.BooleanVar(value=False)
         self._overlay = None  # OverlayWindow instance, created on demand
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
+        self.screenshot_size_var = tk.IntVar(value=_read_config_value("screenShotHeight", 320, int))
 
         # Team filter
         cur_team = _read_config_value("aaTeamFilter", "all", str)
@@ -617,6 +621,7 @@ class VisionViewerApp:
         self.recoil_weapon_var = tk.StringVar(value=_read_config_value("recoilWeapon", "关闭 (Off)", str))
         self.recoil_strength_var = tk.DoubleVar(value=_read_config_value("recoilStrength", 1.0, float))
         self.recoil_smooth_var = tk.IntVar(value=_read_config_value("recoilSmooth", 4, int))
+        self.recoil_time_offset_var = tk.IntVar(value=_read_config_value("recoilTimeOffset", 0, int))
         # Recoil trigger key
         self.recoil_key_var = tk.StringVar()
         cur_rc_key = _read_config_hex("recoilKey", 0x01)
@@ -782,6 +787,10 @@ class VisionViewerApp:
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        # CRITICAL: Disable MouseWheel on all Combobox widgets.
+        # readonly TCombobox responds to MouseWheel by cycling through values,
+        # which silently corrupts settings when the user scrolls the panel.
+        self.root.unbind_class("TCombobox", "<MouseWheel>")
         # Re-point 'right' to the scrollable inner frame
         right = scroll_frame
 
@@ -879,6 +888,9 @@ class VisionViewerApp:
         ttk.Combobox(f2b, textvariable=self.key2_var, values=list(KEY2_OPTIONS.keys()),
                      state="readonly", width=20).pack(side="right")
 
+        # X-axis only aim lock
+        ttk.Checkbutton(right, text="只锁X轴 (Y轴由玩家自己压枪)", variable=self.aim_x_only_var).pack(anchor="w", pady=2)
+
         # Team filter (enemy identification)
         f_team = ttk.Frame(right); f_team.pack(fill="x", pady=2)
         ttk.Label(f_team, text="敌我识别:").pack(side="left")
@@ -940,6 +952,15 @@ class VisionViewerApp:
                  command=lambda v: self.fps_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="实时生效  推荐60~240", font=("", 8)).pack(anchor="w")
 
+        # Screenshot capture size
+        f_ss = ttk.Frame(right); f_ss.pack(fill="x", pady=2)
+        ttk.Label(f_ss, text="截图区域:").pack(side="left")
+        self.ss_label = ttk.Label(f_ss, text=f"{self.screenshot_size_var.get()}x{self.screenshot_size_var.get()}")
+        self.ss_label.pack(side="right")
+        tk.Scale(right, from_=128, to=1024, orient="horizontal", variable=self.screenshot_size_var,
+                 resolution=32, command=lambda v: self.ss_label.configure(text=f"{int(float(v))}x{int(float(v))}")).pack(fill="x")
+        ttk.Label(right, text="重启捕获后生效  越大看越远但推理越慢", font=("", 8)).pack(anchor="w")
+
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # --- Recoil Compensation ---
@@ -976,6 +997,15 @@ class VisionViewerApp:
         tk.Scale(right, from_=1, to=8, orient="horizontal", variable=self.recoil_smooth_var,
                  resolution=1, command=lambda v: self.recoil_smooth_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="1=瞬移(机器感) 3~5=自然手感 8=非常柔和", font=("", 8)).pack(anchor="w")
+
+        # Recoil time offset
+        f_rc_toff = ttk.Frame(right); f_rc_toff.pack(fill="x", pady=2)
+        ttk.Label(f_rc_toff, text="时序偏移(ms):").pack(side="left")
+        self.recoil_toff_label = ttk.Label(f_rc_toff, text=str(self.recoil_time_offset_var.get()))
+        self.recoil_toff_label.pack(side="right")
+        tk.Scale(right, from_=-500, to=500, orient="horizontal", variable=self.recoil_time_offset_var,
+                 resolution=10, command=lambda v: self.recoil_toff_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="负值=提前压枪 正值=延后压枪 瓦用-100~-200", font=("", 8)).pack(anchor="w")
 
         # Recoil hold threshold (tap vs hold)
         f_rc_hold = ttk.Frame(right); f_rc_hold.pack(fill="x", pady=2)
@@ -1429,8 +1459,24 @@ class VisionViewerApp:
     # -------------------------------------------------------- config helpers
     def _gather_config_vals(self):
         """Collect current GUI values into a dict (used for save & profile)."""
+        # Validate combobox values before gathering — warn if any would fall back to default
+        _checks = [
+            ("aaAimMode", self.aim_mode_var.get(), AIM_MODE_OPTIONS),
+            ("aaTargetPart", self.target_var.get(), TARGET_OPTIONS),
+            ("aaActivateKey", self.key_var.get(), KEY_OPTIONS),
+            ("aaSecondaryKey", self.key2_var.get(), KEY2_OPTIONS),
+            ("recoilKey", self.recoil_key_var.get(), KEY_OPTIONS),
+            ("aaTeamFilter", self.team_var.get(), TEAM_OPTIONS),
+            ("aimToggleKey", self.aim_toggle_key_var.get(), HOTKEY_OPTIONS),
+            ("recoilToggleKey", self.recoil_toggle_key_var.get(), HOTKEY_OPTIONS),
+            ("triggerToggleKey", self.trigger_toggle_key_var.get(), HOTKEY_OPTIONS),
+        ]
+        for cfg_name, gui_val, options_dict in _checks:
+            if gui_val not in options_dict:
+                print(f"[CONFIG WARNING] {cfg_name}: GUI value {gui_val!r} not in options, will use fallback default!")
         return {
             "aaFOV": self.fov_var.get(),
+            "aaXOnly": self.aim_x_only_var.get(),
             "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -1440,9 +1486,12 @@ class VisionViewerApp:
             "confidence": round(self.conf_var.get(), 2),
             "crosshairYOffset": self.crosshair_y_offset_var.get(),
             "captureFPS": self.fps_var.get(),
+            "screenShotHeight": self.screenshot_size_var.get(),
+            "screenShotWidth": self.screenshot_size_var.get(),
             "recoilWeapon": self.recoil_weapon_var.get(),
             "recoilStrength": round(self.recoil_strength_var.get(), 2),
             "recoilSmooth": self.recoil_smooth_var.get(),
+            "recoilTimeOffset": self.recoil_time_offset_var.get(),
             "recoilKey": KEY_OPTIONS.get(self.recoil_key_var.get(), 0x01),
             "aaTeamFilter": TEAM_OPTIONS.get(self.team_var.get(), "all"),
             "aimToggleKey": HOTKEY_OPTIONS.get(self.aim_toggle_key_var.get(), 0x74),
@@ -1482,8 +1531,15 @@ class VisionViewerApp:
 
     def _apply_config_vals(self, vals: dict):
         """Apply a config dict to all GUI variables."""
+        # Log key values being applied for debugging config corruption
+        _track = ["aaAimMode", "aaActivateKey", "aaSecondaryKey", "aaTargetPart", "aaTeamFilter"]
+        for k in _track:
+            if k in vals:
+                print(f"[CONFIG APPLY] {k} = {vals[k]!r}")
         if "aaFOV" in vals:
             self.fov_var.set(int(vals["aaFOV"]))
+        if "aaXOnly" in vals:
+            self.aim_x_only_var.set(bool(vals["aaXOnly"]))
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
@@ -1504,12 +1560,16 @@ class VisionViewerApp:
             self.crosshair_y_offset_var.set(int(vals["crosshairYOffset"]))
         if "captureFPS" in vals:
             self.fps_var.set(int(vals["captureFPS"]))
+        if "screenShotHeight" in vals:
+            self.screenshot_size_var.set(int(vals["screenShotHeight"]))
         if "recoilWeapon" in vals:
             self.recoil_weapon_var.set(vals["recoilWeapon"])
         if "recoilStrength" in vals:
             self.recoil_strength_var.set(float(vals["recoilStrength"]))
         if "recoilSmooth" in vals:
             self.recoil_smooth_var.set(int(vals["recoilSmooth"]))
+        if "recoilTimeOffset" in vals:
+            self.recoil_time_offset_var.set(int(vals["recoilTimeOffset"]))
         if "recoilKey" in vals:
             self.recoil_key_var.set(KEY_CODE_TO_NAME.get(int(vals["recoilKey"]), "鼠标左键 (Left Click)"))
         if "aaTeamFilter" in vals:
@@ -1621,9 +1681,11 @@ class VisionViewerApp:
             messagebox.showerror("错误", f"方案「{name}」加载失败或为空。")
             return
         self._apply_config_vals(vals)
-        # Also write to config.py so it takes effect (exclude profile-only keys)
+        # Write the GUI-applied values (not raw profile) to config.py
+        # This ensures values go through the proper mapping round-trip
         try:
-            config_vals = {k: v for k, v in vals.items() if k not in self._PROFILE_ONLY_KEYS}
+            fresh_vals = self._gather_config_vals()
+            config_vals = {k: v for k, v in fresh_vals.items() if k not in self._PROFILE_ONLY_KEYS}
             save_config_values(config_vals)
         except Exception:
             pass
@@ -1828,8 +1890,9 @@ class VisionViewerApp:
             # Read model expected input size (handle dynamic axes from YOLOv11)
             inp = new_model.get_inputs()[0]
             shape = inp.shape  # e.g. [1, 3, 640, 640] or ['batch', 3, 'height', 'width']
-            model_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) else screenShotHeight
-            model_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) else screenShotWidth
+            _ss_fallback = self.screenshot_size_var.get()
+            model_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) else _ss_fallback
+            model_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) else _ss_fallback
             model_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
             # Read class names from model metadata and update filter UI
             cls_names = self._read_model_class_names(new_model)
@@ -1961,8 +2024,9 @@ class VisionViewerApp:
         # Read model expected input size (handle dynamic axes from YOLOv11)
         inp = self.model.get_inputs()[0]
         shape = inp.shape  # e.g. [1, 3, 640, 640] or ['batch', 3, 'height', 'width']
-        model_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) else screenShotHeight
-        model_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) else screenShotWidth
+        _ss_fallback = self.screenshot_size_var.get()
+        model_h = int(shape[2]) if len(shape) >= 4 and isinstance(shape[2], int) else _ss_fallback
+        model_w = int(shape[3]) if len(shape) >= 4 and isinstance(shape[3], int) else _ss_fallback
         self._model_input_size = (model_w, model_h)
         self._model_input_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
         self._model_input_name = inp.name
@@ -2025,9 +2089,10 @@ class VisionViewerApp:
             center_x = (window.left + window.right) // 2
             center_y = (window.top + window.bottom) // 2
             print(f"[CAPTURE] Fallback to window bounds: center=({center_x},{center_y}) err={e}")
-        left = center_x - screenShotWidth // 2
-        top = center_y - screenShotHeight // 2
-        region = (left, top, left + screenShotWidth, top + screenShotHeight)
+        ss = self.screenshot_size_var.get()
+        left = center_x - ss // 2
+        top = center_y - ss // 2
+        region = (left, top, left + ss, top + ss)
         print(f"[CAPTURE] region={region}")
         self._mouse_mode = False
         self._capture_region = region  # for overlay coordinate mapping
@@ -2058,9 +2123,10 @@ class VisionViewerApp:
         sh = user32.GetSystemMetrics(1)
         center_x = sw // 2
         center_y = sh // 2
-        left = max(0, center_x - screenShotWidth // 2)
-        top = max(0, center_y - screenShotHeight // 2)
-        region = (left, top, left + screenShotWidth, top + screenShotHeight)
+        ss = self.screenshot_size_var.get()
+        left = max(0, center_x - ss // 2)
+        top = max(0, center_y - ss // 2)
+        region = (left, top, left + ss, top + ss)
         print(f"[CAPTURE] Fullscreen center mode: screen={sw}x{sh} region={region}")
         self._mouse_mode = False
         self._capture_region = region
@@ -2109,8 +2175,9 @@ class VisionViewerApp:
         last_time = time.time()
         frame_count = 0
         fps = 0.0
-        cWidth = screenShotWidth // 2
-        cHeight = screenShotHeight // 2
+        _ss = self.screenshot_size_var.get()
+        cWidth = _ss // 2
+        cHeight = _ss // 2
         debug_timer = time.time()
 
         aim_log_timer = 0.0
@@ -2146,7 +2213,7 @@ class VisionViewerApp:
 
         print("===== Aim loop started =====")
         print(f"  win32api loaded = {win32api is not None}")
-        print(f"  screenShot = {screenShotWidth}x{screenShotHeight}")
+        print(f"  screenShot = {_ss}x{_ss}")
         print(f"  target_fps = {current_fps}")
         print("=============================")
 
@@ -2158,9 +2225,9 @@ class VisionViewerApp:
                 cx, cy = win32api.GetCursorPos()
                 sw = ctypes.windll.user32.GetSystemMetrics(0)  # screen width
                 sh = ctypes.windll.user32.GetSystemMetrics(1)  # screen height
-                ml = max(0, min(cx - screenShotWidth // 2, sw - screenShotWidth))
-                mt = max(0, min(cy - screenShotHeight // 2, sh - screenShotHeight))
-                mouse_region = (ml, mt, ml + screenShotWidth, mt + screenShotHeight)
+                ml = max(0, min(cx - _ss // 2, sw - _ss))
+                mt = max(0, min(cy - _ss // 2, sh - _ss))
+                mouse_region = (ml, mt, ml + _ss, mt + _ss)
                 capture_region = mouse_region
                 frame = self.camera.grab(region=mouse_region) if self.camera else None
             else:
@@ -2646,6 +2713,10 @@ class VisionViewerApp:
                     rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
 
+                    # X-only aim lock: suppress Y-axis, let player control vertical manually
+                    if self.aim_x_only_var.get():
+                        rawY = 0.0
+
                     cur_aim_mode = AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot")
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
@@ -2767,7 +2838,10 @@ class VisionViewerApp:
 
                 if cur_lmb and spray_start_time > 0:
                     # Calculate which bullet we're on using per-bullet timing
-                    elapsed_ms = (time.perf_counter() - spray_start_time) * 1000.0
+                    # recoilTimeOffset: negative = compensate earlier, positive = later
+                    rc_time_offset = self.recoil_time_offset_var.get()
+                    elapsed_ms = (time.perf_counter() - spray_start_time) * 1000.0 - rc_time_offset
+                    elapsed_ms = max(elapsed_ms, 0.0)
                     cumulative_ms = 0.0
                     bullet_idx = 0
                     for bi in range(rc_mag):
@@ -2881,30 +2955,51 @@ class VisionViewerApp:
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 
+        self._cleanup_camera()
         self.root.after(0, self.stop_viewer)
 
     def stop_viewer(self):
         if not self.running and self.camera is None:
             return
         self.running = False
-        try:
-            if self.camera is not None:
-                self.camera.release()
-        except Exception:
-            pass
-        self.camera = None
+        # Camera cleanup is handled by _cleanup_camera, called from the worker
+        # thread after it exits the loop (see viewer_loop end).
+        # We only do UI cleanup here to keep the main thread non-blocking.
         if self._overlay is not None:
             self._overlay.clear()
         cv2.destroyAllWindows()
         self.status_var.set("已停止")
 
+    def _cleanup_camera(self):
+        """Release camera resources. Called from worker thread after loop exits."""
+        cam = self.camera
+        self.camera = None
+        self.worker = None
+        if cam is not None:
+            try:
+                cam.release()
+            except Exception as e:
+                print(f"[STOP] camera.release() error: {e}")
+        print("[STOP] Camera released")
+
     def on_close(self):
         self._key_poll_running = False
         self._stop_rigid_recoil()
-        self.stop_viewer()
+        self.running = False
+        # Wait briefly for worker thread to finish before destroying window
+        if self.worker is not None and self.worker.is_alive():
+            self.worker.join(timeout=2.0)
+        # Now safe to release camera and destroy UI
+        try:
+            if self.camera is not None:
+                self.camera.release()
+                self.camera = None
+        except Exception:
+            pass
         if self._overlay is not None:
             self._overlay.destroy()
             self._overlay = None
+        cv2.destroyAllWindows()
         self.root.destroy()
 
 

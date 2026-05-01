@@ -1,6 +1,6 @@
 # Portion of screen to be captured (This forms a square/rectangle around the center of screen)
-screenShotHeight = 320
-screenShotWidth = 320
+screenShotHeight = 416
+screenShotWidth = 416
 
 # Use "left" or "right" for the mask side depending on where the interfering object is, useful for 3rd player models or large guns
 useMask = False
@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 0.6
+aaMovementAmp = 0.5
 
 # Person Class Confidence
 confidence = 0.3
@@ -33,7 +33,7 @@ aaActivateKey = 0x2
 
 # Secondary aim activation key (0=disabled)
 # Common: 0x05=X1 side button, 0x06=X2 side button
-aaSecondaryKey = 0x10
+aaSecondaryKey = 0x5
 
 # Aim target: "head", "body", or "nearest"
 # "head" - aims at the top of the bounding box (head area)
@@ -48,29 +48,37 @@ aaTeamFilter = "all"
 # Aim mode: "aimbot" = full auto-aim (takes over mouse), "assist" = aim assist (additive pull, you keep mouse control)
 aaAimMode = "aimbot"
 
+# X-axis only aim lock (True = only track horizontal, Y-axis left to player for manual recoil)
+aaXOnly = False
+
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.4
+aaSmoothFactor = 1.0
 
 # Aim FOV (field of view) - only aim at targets within this pixel radius from crosshair
 # Set to 0 to disable FOV limit (aim at any target on screen)
-aaFOV = 137
+aaFOV = 63
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -8
+crosshairYOffset = -18
 
 # Screen capture FPS (30-500)
-captureFPS = 292
+captureFPS = 266
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
-recoilWeapon = "M4A4"
+recoilWeapon = "AK-47"
 
 # Recoil compensation strength multiplier (1.0 = standard, adjust for sensitivity)
-recoilStrength = 1.0
+recoilStrength = 1.5
 
 # Recoil smoothness (1=instant/robotic, 3~5=natural hand feel, 8=very smooth)
 recoilSmooth = 8
+
+# Recoil time offset in ms (negative=compensate earlier, positive=compensate later)
+# If recoil kicks up before compensation catches up, use negative values like -100
+# Range: -500 ~ +500, default 0
+recoilTimeOffset = 0
 
 # Recoil trigger key (only apply recoil while this key is held)
 # Default: 0x01 = Left mouse button (shooting key)
@@ -79,17 +87,17 @@ recoilKey = 1
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.
-aimToggleKey = 116
-recoilToggleKey = 36
-triggerToggleKey = 123
+aimToggleKey = 118
+recoilToggleKey = 122
+triggerToggleKey = 121
 
 # Rigid recoil mode (FullExternal-style dedicated thread)
 # Weapon for rigid recoil ("关闭 (Off)" = disabled)
 rigidWeapon = "AK-47"
 # CS2 in-game sensitivity (MUST match your game setting for accurate recoil control)
-cs2Sensitivity = 1.08
+cs2Sensitivity = 1.09
 # Smoothness: steps=sub-moves per bullet (1=instant, 2~3=moderate, 5+=smooth)
-rigidSteps = 2
+rigidSteps = 1
 # Delay between sub-steps in ms (recommended: 1step=100, 2steps=25, 5steps=4)
 rigidDelay1 = 100
 # Extra delay after all sub-steps in ms (usually 0)
@@ -102,11 +110,11 @@ antiflashDelay = 0.5
 antiflashConf = 0.5
 
 # Color detection mode (找色模式) — use HSV color instead of AI model
-colorPreset = "青色 (Cyan)"
-colorHLow = 80
-colorSLow = 100
-colorVLow = 100
-colorHHigh = 100
+colorPreset = "黄色 (Yellow)"
+colorHLow = 20
+colorSLow = 125
+colorVLow = 150
+colorHHigh = 40
 colorSHigh = 255
 colorVHigh = 255
 colorSmooth = 0.05
@@ -126,7 +134,7 @@ visuals = True
 centerOfScreen = True
 
 # Selected detection model (ONNX filename)
-selectedModel = "models\GO_YOLOV11n_敌我_256_头身.onnx"
+selectedModel = "models\v11s256.onnx"
 
 # ONNX ONLY - Choose 1 of the 3 below
 # 1 - CPU

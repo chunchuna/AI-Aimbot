@@ -298,6 +298,311 @@ RECOIL_DATA = {
             (0, 0, 88),        # bullet 30
         ],
     },
+    # ===========================================================================
+    # VALORANT Weapons — 瓦洛兰特武器压枪数据
+    # ===========================================================================
+    # Reference: varolant_script.lua Vandal data + known Valorant recoil specs.
+    # At reference 800 DPI / 0.5 in-game sens.  verticalBase ≈ 3.5 px/bullet.
+    # Positive dy = move mouse DOWN (compensate upward recoil).
+    # Positive dx = move mouse RIGHT (compensate leftward pull).
+    # ===========================================================================
+
+    # --- Vandal: 9.75 RPS, 25 rounds, 102ms between shots ---
+    # Stage pattern from Lua: 5 stages × 5 bullets each
+    # Stage 1 (1-5):  vert×0.9, horiz=0
+    # Stage 2 (6-10): vert×1.0, horiz±0.3
+    # Stage 3 (11-15):vert×1.2, horiz±0.8 alternating R/L
+    # Stage 4 (16-20):vert×1.3, horiz±1.2 alternating R/L
+    # Stage 5 (21-25):vert×1.5, horiz±1.5 alternating R/L
+    "Vandal (瓦)": {
+        "mag_size": 25,
+        "pattern": [
+            # Stage 1: bullets 1-5 — tight grouping, mostly vertical
+            (0, 0, 102),       # bullet 1: first shot, perfect accuracy
+            (0, 3, 102),       # bullet 2
+            (0, 3, 102),       # bullet 3
+            (0, 3, 102),       # bullet 4
+            (0, 3, 102),       # bullet 5
+            # Stage 2: bullets 6-10 — slight horizontal drift begins
+            (1, 4, 102),       # bullet 6
+            (-1, 4, 102),      # bullet 7
+            (1, 3, 102),       # bullet 8
+            (-1, 4, 102),      # bullet 9
+            (1, 3, 102),       # bullet 10
+            # Stage 3: bullets 11-15 — right-left alternation starts
+            (3, 4, 101),       # bullet 11: right pull
+            (3, 4, 101),       # bullet 12: right
+            (-2, 4, 101),      # bullet 13: left
+            (-2, 5, 101),      # bullet 14: left
+            (3, 4, 101),       # bullet 15: right
+            # Stage 4: bullets 16-20 — stronger lateral movement
+            (4, 5, 100),       # bullet 16: right
+            (4, 5, 100),       # bullet 17: right
+            (-3, 5, 100),      # bullet 18: left
+            (-3, 4, 100),      # bullet 19: left
+            (4, 5, 100),       # bullet 20: right
+            # Stage 5: bullets 21-25 — max recoil, zigzag
+            (5, 5, 99),        # bullet 21: right
+            (5, 5, 99),        # bullet 22: right
+            (-4, 5, 99),       # bullet 23: left
+            (-4, 5, 99),       # bullet 24: left
+            (5, 5, 99),        # bullet 25: right
+        ],
+    },
+
+    # --- Phantom: 11 RPS, 30 rounds, 90ms between shots ---
+    # Tighter grouping than Vandal, less vertical recoil, moderate horizontal
+    "Phantom (幻)": {
+        "mag_size": 30,
+        "pattern": [
+            # Stage 1: bullets 1-6 — very tight
+            (0, 0, 90),       # bullet 1
+            (0, 2, 90),       # bullet 2
+            (0, 3, 90),       # bullet 3
+            (0, 3, 90),       # bullet 4
+            (1, 3, 90),       # bullet 5
+            (-1, 3, 90),      # bullet 6
+            # Stage 2: bullets 7-12 — moderate vertical
+            (1, 4, 90),       # bullet 7
+            (-1, 4, 90),      # bullet 8
+            (2, 3, 90),       # bullet 9
+            (-1, 3, 90),      # bullet 10
+            (1, 4, 90),       # bullet 11
+            (-2, 3, 90),      # bullet 12
+            # Stage 3: bullets 13-18 — horizontal drift increases
+            (3, 3, 90),       # bullet 13: right pull
+            (2, 3, 90),       # bullet 14
+            (-2, 3, 90),      # bullet 15: left
+            (-3, 3, 90),      # bullet 16
+            (2, 3, 90),       # bullet 17: right
+            (3, 2, 90),       # bullet 18
+            # Stage 4: bullets 19-24 — wider pattern
+            (-3, 3, 90),      # bullet 19: left
+            (-2, 3, 90),      # bullet 20
+            (3, 3, 90),       # bullet 21: right
+            (2, 3, 90),       # bullet 22
+            (-3, 2, 90),      # bullet 23: left
+            (-2, 3, 90),      # bullet 24
+            # Stage 5: bullets 25-30 — tail
+            (3, 2, 90),       # bullet 25
+            (2, 2, 90),       # bullet 26
+            (-2, 2, 90),      # bullet 27
+            (-3, 2, 90),      # bullet 28
+            (2, 2, 90),       # bullet 29
+            (1, 2, 90),       # bullet 30
+        ],
+    },
+
+    # --- Spectre: 13.33 RPS, 30 rounds, 75ms between shots ---
+    # SMG — fast fire, low recoil, moderate spread
+    "Spectre (幽)": {
+        "mag_size": 30,
+        "pattern": [
+            (0, 0, 75),       # bullet 1
+            (0, 2, 75),       # bullet 2
+            (0, 2, 75),       # bullet 3
+            (1, 2, 75),       # bullet 4
+            (-1, 3, 75),      # bullet 5
+            (1, 3, 75),       # bullet 6
+            (-1, 3, 75),      # bullet 7
+            (2, 2, 75),       # bullet 8
+            (-1, 2, 75),      # bullet 9
+            (1, 3, 75),       # bullet 10
+            (-2, 2, 75),      # bullet 11
+            (2, 2, 75),       # bullet 12
+            (-1, 2, 75),      # bullet 13
+            (2, 2, 75),       # bullet 14
+            (-2, 2, 75),      # bullet 15
+            (1, 2, 75),       # bullet 16
+            (-1, 2, 75),      # bullet 17
+            (2, 1, 75),       # bullet 18
+            (-2, 2, 75),      # bullet 19
+            (1, 1, 75),       # bullet 20
+            (-1, 2, 75),      # bullet 21
+            (2, 1, 75),       # bullet 22
+            (-2, 1, 75),      # bullet 23
+            (1, 1, 75),       # bullet 24
+            (-1, 1, 75),      # bullet 25
+            (1, 1, 75),       # bullet 26
+            (-1, 1, 75),      # bullet 27
+            (1, 1, 75),       # bullet 28
+            (0, 1, 75),       # bullet 29
+            (0, 1, 75),       # bullet 30
+        ],
+    },
+
+    # --- Stinger: 16 RPS, 20 rounds, 62ms between shots ---
+    # SMG — very fast fire, light recoil per bullet but accumulates
+    "Stinger (刺)": {
+        "mag_size": 20,
+        "pattern": [
+            (0, 0, 62),       # bullet 1
+            (0, 2, 62),       # bullet 2
+            (0, 2, 62),       # bullet 3
+            (1, 2, 62),       # bullet 4
+            (-1, 2, 62),      # bullet 5
+            (1, 3, 62),       # bullet 6
+            (-1, 3, 62),      # bullet 7
+            (1, 2, 62),       # bullet 8
+            (-1, 2, 62),      # bullet 9
+            (2, 2, 62),       # bullet 10
+            (-2, 2, 62),      # bullet 11
+            (1, 2, 62),       # bullet 12
+            (-1, 2, 62),      # bullet 13
+            (2, 1, 62),       # bullet 14
+            (-2, 2, 62),      # bullet 15
+            (1, 1, 62),       # bullet 16
+            (-1, 1, 62),      # bullet 17
+            (1, 1, 62),       # bullet 18
+            (-1, 1, 62),      # bullet 19
+            (0, 1, 62),       # bullet 20
+        ],
+    },
+
+    # --- Bulldog: 9.15 RPS, 24 rounds, 109ms between shots ---
+    # Rifle — moderate recoil, slight left-right sway
+    "Bulldog (斗)": {
+        "mag_size": 24,
+        "pattern": [
+            (0, 0, 109),      # bullet 1
+            (0, 3, 109),      # bullet 2
+            (0, 3, 109),      # bullet 3
+            (1, 4, 109),      # bullet 4
+            (-1, 4, 109),     # bullet 5
+            (1, 4, 109),      # bullet 6
+            (-1, 4, 109),     # bullet 7
+            (2, 4, 109),      # bullet 8
+            (-2, 3, 109),     # bullet 9
+            (2, 3, 109),      # bullet 10
+            (-2, 3, 109),     # bullet 11
+            (3, 3, 109),      # bullet 12
+            (-2, 3, 109),     # bullet 13
+            (2, 3, 109),      # bullet 14
+            (-3, 2, 109),     # bullet 15
+            (2, 3, 109),      # bullet 16
+            (-2, 2, 109),     # bullet 17
+            (3, 2, 109),      # bullet 18
+            (-3, 2, 109),     # bullet 19
+            (2, 2, 109),      # bullet 20
+            (-2, 2, 109),     # bullet 21
+            (2, 2, 109),      # bullet 22
+            (-1, 2, 109),     # bullet 23
+            (1, 2, 109),      # bullet 24
+        ],
+    },
+
+    # --- Guardian: 6.5 RPS, 12 rounds, 153ms between shots ---
+    # Semi-auto DMR — strong per-shot recoil, resets between shots
+    "Guardian (卫)": {
+        "mag_size": 12,
+        "pattern": [
+            (0, 0, 153),      # bullet 1
+            (0, 5, 153),      # bullet 2
+            (0, 5, 153),      # bullet 3
+            (1, 5, 153),      # bullet 4
+            (-1, 5, 153),     # bullet 5
+            (1, 5, 153),      # bullet 6
+            (-1, 5, 153),     # bullet 7
+            (1, 5, 153),      # bullet 8
+            (-1, 5, 153),     # bullet 9
+            (1, 5, 153),      # bullet 10
+            (-1, 5, 153),     # bullet 11
+            (0, 5, 153),      # bullet 12
+        ],
+    },
+
+    # --- Odin: 12 RPS → 15.6 RPS (spins up), 100 rounds ---
+    # Heavy MG — starts slow, speeds up, heavy recoil
+    "Odin (奥)": {
+        "mag_size": 100,
+        "pattern": [
+            # Spin-up phase: bullets 1-10 (83ms between shots)
+            (0, 0, 83),       # bullet 1
+            (0, 4, 83),       # bullet 2
+            (0, 4, 83),       # bullet 3
+            (1, 5, 83),       # bullet 4
+            (-1, 5, 83),      # bullet 5
+            (1, 5, 83),       # bullet 6
+            (-1, 5, 80),      # bullet 7
+            (2, 5, 78),       # bullet 8
+            (-2, 5, 75),      # bullet 9
+            (2, 5, 72),       # bullet 10
+            # Full speed phase: bullets 11-30 (64ms between shots)
+            (-2, 4, 64),      # bullet 11
+            (3, 4, 64),       # bullet 12
+            (-2, 4, 64),      # bullet 13
+            (2, 4, 64),       # bullet 14
+            (-3, 4, 64),      # bullet 15
+            (3, 3, 64),       # bullet 16
+            (-2, 3, 64),      # bullet 17
+            (2, 3, 64),       # bullet 18
+            (-3, 3, 64),      # bullet 19
+            (2, 3, 64),       # bullet 20
+            (-2, 3, 64),      # bullet 21
+            (3, 3, 64),       # bullet 22
+            (-2, 3, 64),      # bullet 23
+            (2, 3, 64),       # bullet 24
+            (-2, 2, 64),      # bullet 25
+            (2, 2, 64),       # bullet 26
+            (-2, 2, 64),      # bullet 27
+            (2, 2, 64),       # bullet 28
+            (-2, 2, 64),      # bullet 29
+            (2, 2, 64),       # bullet 30
+            # Sustained fire: repeat last pattern (simplified, bullets 31+)
+            (-2, 2, 64),      # bullet 31
+            (2, 2, 64),       # bullet 32
+            (-2, 2, 64),      # bullet 33
+            (2, 2, 64),       # bullet 34
+            (-2, 2, 64),      # bullet 35
+            (2, 2, 64),       # bullet 36
+            (-2, 2, 64),      # bullet 37
+            (2, 2, 64),       # bullet 38
+            (-2, 2, 64),      # bullet 39
+            (2, 2, 64),       # bullet 40
+        ],
+    },
+
+    # --- Ares: 10 RPS → 13 RPS (spins up), 50 rounds ---
+    # Light MG — lighter than Odin, still spins up
+    "Ares (战)": {
+        "mag_size": 50,
+        "pattern": [
+            # Spin-up phase: bullets 1-8 (100ms between shots)
+            (0, 0, 100),      # bullet 1
+            (0, 3, 100),      # bullet 2
+            (0, 3, 96),       # bullet 3
+            (1, 4, 92),       # bullet 4
+            (-1, 4, 88),      # bullet 5
+            (1, 4, 84),       # bullet 6
+            (-1, 4, 80),      # bullet 7
+            (1, 4, 77),       # bullet 8
+            # Full speed phase: bullets 9-30 (77ms between shots)
+            (-1, 3, 77),      # bullet 9
+            (2, 3, 77),       # bullet 10
+            (-2, 3, 77),      # bullet 11
+            (2, 3, 77),       # bullet 12
+            (-1, 3, 77),      # bullet 13
+            (2, 3, 77),       # bullet 14
+            (-2, 3, 77),      # bullet 15
+            (1, 2, 77),       # bullet 16
+            (-1, 2, 77),      # bullet 17
+            (2, 2, 77),       # bullet 18
+            (-2, 2, 77),      # bullet 19
+            (1, 2, 77),       # bullet 20
+            (-1, 2, 77),      # bullet 21
+            (2, 2, 77),       # bullet 22
+            (-1, 2, 77),      # bullet 23
+            (1, 2, 77),       # bullet 24
+            (-1, 2, 77),      # bullet 25
+            (1, 2, 77),       # bullet 26
+            (-1, 2, 77),      # bullet 27
+            (1, 2, 77),       # bullet 28
+            (-1, 2, 77),      # bullet 29
+            (1, 2, 77),       # bullet 30
+        ],
+    },
+
+    # --- Disable recoil compensation ---
     "关闭 (Off)": {
         "mag_size": 0,
         "pattern": [],
