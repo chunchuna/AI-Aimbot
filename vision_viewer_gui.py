@@ -605,6 +605,10 @@ class VisionViewerApp:
 
         # X-axis only aim lock (Y-axis left to player for manual recoil control)
         self.aim_x_only_var = tk.BooleanVar(value=_read_config_value("aaXOnly", False, bool))
+        # Duration (ms) to keep full X+Y lock before releasing Y to player
+        self.aim_x_lock_duration_var = tk.IntVar(value=_read_config_value("aaXLockDuration", 0, int))
+        # Always-aim: no need to hold aim key
+        self.aim_always_var = tk.BooleanVar(value=_read_config_value("aaAlwaysAim", False, bool))
 
         self.visuals_var = tk.BooleanVar(value=True)
         self.overlay_var = tk.BooleanVar(value=False)
@@ -890,6 +894,18 @@ class VisionViewerApp:
 
         # X-axis only aim lock
         ttk.Checkbutton(right, text="只锁X轴 (Y轴由玩家自己压枪)", variable=self.aim_x_only_var).pack(anchor="w", pady=2)
+
+        # X-lock duration: full X+Y lock for first N ms, then release Y
+        f_xlock = ttk.Frame(right); f_xlock.pack(fill="x", pady=2)
+        ttk.Label(f_xlock, text="锁头时长(ms):").pack(side="left")
+        self.xlock_dur_label = ttk.Label(f_xlock, text=str(self.aim_x_lock_duration_var.get()))
+        self.xlock_dur_label.pack(side="right")
+        tk.Scale(right, from_=0, to=1000, orient="horizontal", variable=self.aim_x_lock_duration_var,
+                 resolution=50, command=lambda v: self.xlock_dur_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="按下自瞄键后先锁XY轴N毫秒 之后只锁X (0=始终只锁X)", font=("", 8)).pack(anchor="w")
+
+        # Always-aim checkbox
+        ttk.Checkbutton(right, text="一直自瞄 (无需按键，始终追踪目标)", variable=self.aim_always_var).pack(anchor="w", pady=2)
 
         # Team filter (enemy identification)
         f_team = ttk.Frame(right); f_team.pack(fill="x", pady=2)
@@ -1477,6 +1493,8 @@ class VisionViewerApp:
         return {
             "aaFOV": self.fov_var.get(),
             "aaXOnly": self.aim_x_only_var.get(),
+            "aaXLockDuration": self.aim_x_lock_duration_var.get(),
+            "aaAlwaysAim": self.aim_always_var.get(),
             "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -1540,6 +1558,10 @@ class VisionViewerApp:
             self.fov_var.set(int(vals["aaFOV"]))
         if "aaXOnly" in vals:
             self.aim_x_only_var.set(bool(vals["aaXOnly"]))
+        if "aaXLockDuration" in vals:
+            self.aim_x_lock_duration_var.set(int(vals["aaXLockDuration"]))
+        if "aaAlwaysAim" in vals:
+            self.aim_always_var.set(bool(vals["aaAlwaysAim"]))
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
@@ -2202,6 +2224,10 @@ class VisionViewerApp:
         recoil_accum_y = 0.0
         recoil_key_press_time = 0.0  # When recoil key was first pressed (for hold threshold)
 
+        # Aim key press tracking (for X-only lock duration)
+        aim_key_press_time = 0.0   # When aim key was first pressed
+        prev_aim_key = False       # Previous frame's aim key state
+
         # Triggerbot state
         trigger_on_target_since = 0.0  # timestamp when crosshair first entered a target box
         trigger_fired = False          # whether we already fired for this "on-target" episode
@@ -2640,6 +2666,16 @@ class VisionViewerApp:
             cur_y_offset = self.crosshair_y_offset_var.get()
             # Key state comes from background 1000Hz polling thread
             keyDown = self._key_is_down
+            # Always-aim: bypass key requirement
+            if self.aim_always_var.get():
+                keyDown = True
+
+            # Track aim key press/release for X-only lock duration
+            if keyDown and not prev_aim_key:
+                aim_key_press_time = time.perf_counter()
+            elif not keyDown:
+                aim_key_press_time = 0.0
+            prev_aim_key = keyDown
 
             # Keep unfiltered targets for triggerbot (FOV is aim-only concept)
             all_targets = list(targets)
@@ -2714,8 +2750,16 @@ class VisionViewerApp:
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
 
                     # X-only aim lock: suppress Y-axis, let player control vertical manually
+                    # With lock duration: keep full X+Y for first N ms, then release Y
                     if self.aim_x_only_var.get():
-                        rawY = 0.0
+                        x_lock_dur = self.aim_x_lock_duration_var.get()
+                        if x_lock_dur > 0 and aim_key_press_time > 0:
+                            aim_held_ms = (time.perf_counter() - aim_key_press_time) * 1000.0
+                            if aim_held_ms > x_lock_dur:
+                                rawY = 0.0
+                            # else: within lock duration, keep rawY (full X+Y)
+                        else:
+                            rawY = 0.0
 
                     cur_aim_mode = AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot")
                     raw_dist = (rawX**2 + rawY**2) ** 0.5

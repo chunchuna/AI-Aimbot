@@ -51,6 +51,14 @@ aaAimMode = "aimbot"
 # X-axis only aim lock (True = only track horizontal, Y-axis left to player for manual recoil)
 aaXOnly = False
 
+# X-lock duration in ms: when aaXOnly is on, keep full X+Y lock for this many ms first
+# After this duration, release Y-axis to player for manual recoil control
+# 0 = always X-only (no initial lock), 200 = lock head for 200ms then release Y
+aaXLockDuration = 0
+
+# Always-aim: always track targets without needing to hold aim key
+aaAlwaysAim = False
+
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
 aaSmoothFactor = 1.0
