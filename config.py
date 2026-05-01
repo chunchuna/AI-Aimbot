@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 0.9
+aaMovementAmp = 0.8
 
 # Person Class Confidence
 confidence = 0.3
@@ -73,17 +73,14 @@ aaTargetLockFrames = 8
 # Max pixel distance to consider same target between frames
 aaTargetLockRadius = 100
 
-# Predictive aim: aim at where the target WILL be, not where it IS
-aaPredict = False
-# Prediction strength: how many frames ahead to predict (0.1~2.0)
-# 0.5 = half frame, 1.0 = one full frame ahead, higher = more lead
-aaPredictStrength = 0.2
+# PID controller: Ki (integral gain) — eliminates steady-state tracking error
+# on moving targets. Without Ki, pure P-control always lags behind.
+# 0 = pure P (old behavior), 0.05~0.3 = good tracking. Too high = oscillation.
+aaKi = 1.0
 
-# Directness: how much of the raw pixel offset to apply per frame
-# 0.0 = fully smoothed (old behavior, limited by amp/smooth)
-# 1.0 = raw 1:1 pixel snap (mouse moves exact offset to target each frame)
-# Recommended: 0.7~0.9 for moving targets (fast + slightly natural)
-aaDirectness = 0.0
+# PID controller: Kd (derivative gain) — dampens overshoot and oscillation
+# 0 = no damping, 0.02~0.1 = smooth arrival. Too high = sluggish.
+aaKd = 0.0
 
 # Overlay customization
 ovBoxThickness = 1
@@ -97,8 +94,8 @@ ovDotStyle = "diamond"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 2.6
-aaFOV = 63
+aaSmoothFactor = 1.0
+aaFOV = 122
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower

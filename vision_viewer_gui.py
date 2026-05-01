@@ -62,6 +62,118 @@ except ImportError:
 
 import ctypes.wintypes
 
+# ---- PID Controller for aim tracking ----
+class AimPID:
+    """Dual-axis PID controller for mouse aim tracking.
+
+    Why PID instead of pure P-controller:
+    - P only: moveX = error * Kp → always has steady-state error on moving targets
+    - P+I: integral term accumulates error over time → eliminates steady-state error
+           → can lock onto any speed target with zero offset
+    - P+I+D: derivative term dampens overshoot when error changes rapidly
+           → smooth arrival, no oscillation
+
+    Anti-windup: integral is clamped to prevent runaway accumulation
+    when the target is far away or briefly lost.
+    """
+
+    def __init__(self):
+        self._integral_x = 0.0
+        self._integral_y = 0.0
+        self._prev_error_x = 0.0
+        self._prev_error_y = 0.0
+        self._prev_t = 0.0
+        self._initialized = False
+        self._frame_count = 0       # for soft-start ramp
+
+    def reset(self):
+        """Reset PID state (call on target switch or aim key release)."""
+        self._integral_x = 0.0
+        self._integral_y = 0.0
+        self._prev_error_x = 0.0
+        self._prev_error_y = 0.0
+        self._prev_t = 0.0
+        self._initialized = False
+        self._frame_count = 0
+
+    def compute(self, error_x, error_y, kp, ki, kd):
+        """Compute PID output for current error.
+
+        Args:
+            error_x, error_y: pixel offset from crosshair to target
+            kp: proportional gain (like old amp/smooth)
+            ki: integral gain (0 = pure P, 0.01~0.5 typical)
+            kd: derivative gain (0 = no damping, 0.01~0.3 typical)
+
+        Returns:
+            (move_x, move_y): mouse movement in pixels
+        """
+        now = time.perf_counter()
+
+        if not self._initialized:
+            self._prev_error_x = error_x
+            self._prev_error_y = error_y
+            self._prev_t = now
+            self._initialized = True
+            self._frame_count = 1
+            # First frame: soft-start (20% of P-only) to avoid snap
+            return error_x * kp * 0.2, error_y * kp * 0.2
+
+        self._frame_count += 1
+
+        dt = now - self._prev_t
+        if dt <= 0:
+            dt = 1e-4
+        self._prev_t = now
+
+        RAMP_FRAMES = 10  # soft-start duration
+
+        # --- Integral (accumulated error) ---
+        # Only accumulate when: (a) past soft-start, AND (b) error is small.
+        # Large errors (> 30px) are handled by P alone — accumulating integral
+        # during the initial approach would cause overshoot / fling.
+        # Integral's job is to fix persistent SMALL tracking offsets on moving targets.
+        err_mag = (error_x**2 + error_y**2) ** 0.5
+        if self._frame_count > RAMP_FRAMES and err_mag < 30.0:
+            self._integral_x += error_x * dt
+            self._integral_y += error_y * dt
+
+        # Anti-windup clamp
+        INTEGRAL_MAX = 50.0
+        self._integral_x = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral_x))
+        self._integral_y = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral_y))
+
+        # Direction reversal with large error: overshoot, halve integral
+        if error_x * self._prev_error_x < 0 and abs(error_x) > 10.0:
+            self._integral_x *= 0.5
+        if error_y * self._prev_error_y < 0 and abs(error_y) > 10.0:
+            self._integral_y *= 0.5
+
+        # Decay integral when very close to target (< 5px)
+        if err_mag < 5.0:
+            self._integral_x *= 0.7
+            self._integral_y *= 0.7
+
+        # --- Derivative (frame-based, NOT divided by dt) ---
+        deriv_x = error_x - self._prev_error_x
+        deriv_y = error_y - self._prev_error_y
+        self._prev_error_x = error_x
+        self._prev_error_y = error_y
+
+        # --- PID output ---
+        move_x = kp * error_x + ki * self._integral_x + kd * deriv_x
+        move_y = kp * error_y + ki * self._integral_y + kd * deriv_y
+
+        # Soft-start ramp: gradually increase output over first N frames
+        # P-only during ramp (integral blocked above), prevents fling on lock-on
+        if self._frame_count <= RAMP_FRAMES:
+            ramp = self._frame_count / float(RAMP_FRAMES)
+            move_x *= ramp
+            move_y *= ramp
+
+        return move_x, move_y
+
+
 # ---- SendInput struct definitions for rigid recoil (module-level for performance) ----
 class _MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
@@ -699,11 +811,11 @@ class VisionViewerApp:
         self.aim_target_lock_var = tk.BooleanVar(value=_read_config_value("aaTargetLock", True, bool))
         self.aim_target_lock_frames_var = tk.IntVar(value=_read_config_value("aaTargetLockFrames", 8, int))
         self.aim_target_lock_radius_var = tk.IntVar(value=_read_config_value("aaTargetLockRadius", 100, int))
-        # Predictive aim: aim at predicted future position of moving targets
-        self.aim_predict_var = tk.BooleanVar(value=_read_config_value("aaPredict", False, bool))
-        self.aim_predict_strength_var = tk.DoubleVar(value=_read_config_value("aaPredictStrength", 0.5, float))
-        # Directness: 0.0 = fully smoothed (current behavior), 1.0 = raw 1:1 pixel offset (instant snap)
-        self.aim_directness_var = tk.DoubleVar(value=_read_config_value("aaDirectness", 0.0, float))
+        # PID controller gains for aim tracking
+        # Ki (integral): eliminates steady-state error on moving targets. 0=pure P.
+        self.aim_ki_var = tk.DoubleVar(value=_read_config_value("aaKi", 0.0, float))
+        # Kd (derivative): dampens overshoot / oscillation. 0=no damping.
+        self.aim_kd_var = tk.DoubleVar(value=_read_config_value("aaKd", 0.0, float))
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
         self.screenshot_size_var = tk.IntVar(value=_read_config_value("screenShotHeight", 320, int))
@@ -1033,24 +1145,25 @@ class VisionViewerApp:
                  command=lambda v: self.tl_radius_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="帧间目标匹配距离 越大容忍快速移动", font=("", 8)).pack(anchor="w")
 
-        # --- Predictive aim ---
-        ttk.Checkbutton(right, text="预测瞄准 (预判移动目标位置)", variable=self.aim_predict_var).pack(anchor="w", pady=2)
-        f_ps = ttk.Frame(right); f_ps.pack(fill="x", pady=1)
-        ttk.Label(f_ps, text="预判强度:").pack(side="left")
-        self.predict_str_label = ttk.Label(f_ps, text=f"{self.aim_predict_strength_var.get():.2f}")
-        self.predict_str_label.pack(side="right")
-        tk.Scale(right, from_=0.0, to=4.0, orient="horizontal", variable=self.aim_predict_strength_var,
-                 resolution=0.1, command=lambda v: self.predict_str_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
-        ttk.Label(right, text="前瞻时间 1.0=50ms 2.0=100ms 3.0=150ms 推荐1.0~2.0", font=("", 8)).pack(anchor="w")
+        # --- PID controller gains ---
+        ttk.Label(right, text="── PID 控制器 ──", font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        ttk.Label(right, text="Kp = amp/smooth (上方已有), 下面设置 Ki 和 Kd", font=("", 8)).pack(anchor="w")
 
-        # --- Directness ---
-        f_dir = ttk.Frame(right); f_dir.pack(fill="x", pady=1)
-        ttk.Label(f_dir, text="直接度:").pack(side="left")
-        self.directness_label = ttk.Label(f_dir, text=f"{int(self.aim_directness_var.get()*100)}%")
-        self.directness_label.pack(side="right")
-        tk.Scale(right, from_=0.0, to=1.0, orient="horizontal", variable=self.aim_directness_var,
-                 resolution=0.05, command=lambda v: self.directness_label.configure(text=f"{int(float(v)*100)}%")).pack(fill="x")
-        ttk.Label(right, text="需开启预测 降低平滑提高响应速度 0%=原始平滑 100%=无平滑", font=("", 8)).pack(anchor="w")
+        f_ki = ttk.Frame(right); f_ki.pack(fill="x", pady=1)
+        ttk.Label(f_ki, text="Ki (积分):").pack(side="left")
+        self.ki_label = ttk.Label(f_ki, text=f"{self.aim_ki_var.get():.2f}")
+        self.ki_label.pack(side="right")
+        tk.Scale(right, from_=0.0, to=10.0, orient="horizontal", variable=self.aim_ki_var,
+                 resolution=0.1, command=lambda v: self.ki_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
+        ttk.Label(right, text="消除移动目标跟踪偏差 0=纯P 高smooth时需更大Ki", font=("", 8)).pack(anchor="w")
+
+        f_kd = ttk.Frame(right); f_kd.pack(fill="x", pady=1)
+        ttk.Label(f_kd, text="Kd (微分):").pack(side="left")
+        self.kd_label = ttk.Label(f_kd, text=f"{self.aim_kd_var.get():.2f}")
+        self.kd_label.pack(side="right")
+        tk.Scale(right, from_=0.0, to=5.0, orient="horizontal", variable=self.aim_kd_var,
+                 resolution=0.1, command=lambda v: self.kd_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
+        ttk.Label(right, text="抑制过冲/抖动 0=无阻尼 推荐0.5~2.0", font=("", 8)).pack(anchor="w")
 
         # Start a periodic status label updater (catches hotkey toggles too)
         self._update_status_labels()
@@ -1708,9 +1821,8 @@ class VisionViewerApp:
             "aaTargetLock": self.aim_target_lock_var.get(),
             "aaTargetLockFrames": self.aim_target_lock_frames_var.get(),
             "aaTargetLockRadius": self.aim_target_lock_radius_var.get(),
-            "aaPredict": self.aim_predict_var.get(),
-            "aaPredictStrength": round(self.aim_predict_strength_var.get(), 2),
-            "aaDirectness": round(self.aim_directness_var.get(), 2),
+            "aaKi": round(self.aim_ki_var.get(), 3),
+            "aaKd": round(self.aim_kd_var.get(), 3),
             "ovBoxThickness": self.ov_box_thickness_var.get(),
             "ovBoxStyle": self.ov_box_style_var.get(),
             "ovCornerLen": self.ov_corner_len_var.get(),
@@ -1800,12 +1912,10 @@ class VisionViewerApp:
             self.aim_target_lock_frames_var.set(int(vals["aaTargetLockFrames"]))
         if "aaTargetLockRadius" in vals:
             self.aim_target_lock_radius_var.set(int(vals["aaTargetLockRadius"]))
-        if "aaPredict" in vals:
-            self.aim_predict_var.set(bool(vals["aaPredict"]))
-        if "aaPredictStrength" in vals:
-            self.aim_predict_strength_var.set(float(vals["aaPredictStrength"]))
-        if "aaDirectness" in vals:
-            self.aim_directness_var.set(float(vals["aaDirectness"]))
+        if "aaKi" in vals:
+            self.aim_ki_var.set(float(vals["aaKi"]))
+        if "aaKd" in vals:
+            self.aim_kd_var.set(float(vals["aaKd"]))
         if "ovBoxThickness" in vals:
             self.ov_box_thickness_var.set(int(vals["ovBoxThickness"]))
         if "ovBoxStyle" in vals:
@@ -2465,17 +2575,8 @@ class VisionViewerApp:
         aim_key_press_time = 0.0   # When aim key was first pressed
         prev_aim_key = False       # Previous frame's aim key state
 
-        # Predictive aim: sliding window of (timestamp, x, y) for linear velocity
-        pred_history = deque(maxlen=8)  # last 8 detections (~30ms at 266fps)
-        pred_smooth_x = None  # light EMA on raw position to remove pixel jitter
-        pred_smooth_y = None
-        pred_vx = 0.0         # velocity X (capture px/sec)
-        pred_vy = 0.0         # velocity Y (capture px/sec)
-        # Track recent mouse commands to compensate self-induced motion in velocity estimate
-        # When we move the mouse, the camera rotates → target appears to shift in capture.
-        # This contaminates the velocity estimate. Subtracting our own commands recovers
-        # the target's TRUE screen-space motion.
-        mouse_cmd_history = deque(maxlen=40)  # (timestamp, dx, dy) recent mouse counts sent
+        # PID controller for aim tracking (replaces pure P-controller)
+        aim_pid = AimPID()
 
         # Target lock: stick to one target to avoid multi-target pull
         locked_target_pos = None    # (mid_x, mid_y) of locked target
@@ -3039,152 +3140,55 @@ class VisionViewerApp:
                         aim_y_abs = y1_box + box_h * 0.08
                         aim_x_abs = x1_box + box_w * 0.5
 
-                    # --- Predictive aim: sliding-window velocity + time lookahead ---
-                    if self.aim_predict_var.get():
-                        now_pred = time.perf_counter()
-                        # Step 1: Light EMA on raw aim point to kill pixel jitter only
-                        # alpha=0.5 = light filtering, preserves response speed
-                        pos_alpha = 0.5
-                        if pred_smooth_x is None:
-                            pred_smooth_x = aim_x_abs
-                            pred_smooth_y = aim_y_abs
-                        else:
-                            pred_smooth_x += pos_alpha * (aim_x_abs - pred_smooth_x)
-                            pred_smooth_y += pos_alpha * (aim_y_abs - pred_smooth_y)
-
-                        # Step 2: Sliding-window velocity (window endpoint diff)
-                        # This avoids EMA's velocity underestimate and noise amplification.
-                        pred_history.append((now_pred, pred_smooth_x, pred_smooth_y))
-                        if len(pred_history) >= 4:
-                            t0, x0, y0 = pred_history[0]
-                            tN, xN, yN = pred_history[-1]
-                            window_dt = tN - t0
-                            if window_dt > 0.005:
-                                # Self-motion compensation: when we move the mouse, the
-                                # camera rotates and target appears to shift in capture.
-                                # Sum our mouse commands whose effect "landed" in the window.
-                                # Assume detection+action delay ~25ms, so command sent at time
-                                # t landed at t+0.025. Count if t+0.025 is in [t0, tN].
-                                MOUSE_DELAY = 0.025
-                                self_mx = 0.0
-                                self_my = 0.0
-                                for mt, mdx, mdy in mouse_cmd_history:
-                                    eff_t = mt + MOUSE_DELAY
-                                    if t0 <= eff_t <= tN:
-                                        self_mx += mdx
-                                        self_my += mdy
-                                # K_est = estimated capture_px per mouse_count.
-                                # Assuming user's amp/smooth are approximately calibrated,
-                                # effective loop gain amp*K/smooth ≈ 0.3~0.5 (typical stable).
-                                # So K ≈ 0.4 * smooth / amp. Use conservative 0.5 factor.
-                                K_est = max(cur_smooth, 1.0) / max(cur_amp, 0.1) * 0.5
-                                # Adjust position diff: add back self-motion effect
-                                # (we moved +D counts → target shifted -D*K in capture → add +D*K to recover)
-                                adj_dx = (xN - x0) + self_mx * K_est
-                                adj_dy = (yN - y0) + self_my * K_est
-                                new_vx = adj_dx / window_dt
-                                new_vy = adj_dy / window_dt
-                                # Light EMA on velocity to suppress remaining noise
-                                vel_alpha = 0.5
-                                pred_vx += vel_alpha * (new_vx - pred_vx)
-                                pred_vy += vel_alpha * (new_vy - pred_vy)
-
-                                # Emergency-stop detection: if last 3 positions are
-                                # clustered (target has stopped), snap velocity to 0
-                                # immediately. Without this, the 8-frame window keeps
-                                # reporting old movement → "can't brake" overshoot.
-                                if len(pred_history) >= 3:
-                                    recent = list(pred_history)[-3:]
-                                    rxs = [p[1] for p in recent]
-                                    rys = [p[2] for p in recent]
-                                    # Subtract our own mouse motion from spread too,
-                                    # else moving the crosshair causes false "still moving" signal.
-                                    spread_x = max(rxs) - min(rxs)
-                                    spread_y = max(rys) - min(rys)
-                                    if spread_x < 2.5 and spread_y < 2.5:
-                                        pred_vx = 0.0
-                                        pred_vy = 0.0
-
-                        # Step 3: Time-based lookahead (covers detection delay + P-lag)
-                        # strength=1.0 → 50ms ahead, max 3.0 → 150ms
-                        strength = self.aim_predict_strength_var.get()
-                        lookahead_sec = strength * 0.05
-                        pred_dx = pred_vx * lookahead_sec
-                        pred_dy = pred_vy * lookahead_sec
-                        # Safety clamp
-                        pred_len = (pred_dx**2 + pred_dy**2) ** 0.5
-                        if pred_len > 100.0:
-                            s = 100.0 / pred_len
-                            pred_dx *= s
-                            pred_dy *= s
-                        # Final aim point = smoothed position + prediction offset
-                        aim_x_abs = pred_smooth_x + pred_dx
-                        aim_y_abs = pred_smooth_y + pred_dy
-                    else:
-                        pred_smooth_x = None
-                        pred_history.clear()
-                        pred_vx = 0.0
-                        pred_vy = 0.0
-
                     # --- Unified aim offset ---
                     # Raw pixel offset from screen center to aim point
                     rawX = aim_x_abs - cWidth
                     rawY = aim_y_abs - (cHeight + cur_y_offset)
 
                     # --- Adaptive aim: boost amp AND reduce smooth when not on target ---
-                    # Key insight: moveX = rawX * amp / smooth, so both matter.
-                    # Only boosting amp is not enough — smooth is the real speed limiter.
-                    # When off-target: amp goes UP, smooth goes DOWN → multiplicative speedup.
-                    # When on-target: both return to user's base values → smooth & stable.
                     if self.aim_adaptive_var.get():
                         cur_raw_dist = (rawX**2 + rawY**2) ** 0.5
-                        on_target_px = 5.0     # within 5px = "on target", use base values
-                        full_boost_px = 50.0   # beyond 50px = full boost
+                        on_target_px = 5.0
+                        full_boost_px = 50.0
                         if cur_raw_dist > on_target_px:
                             boost_frac = min((cur_raw_dist - on_target_px) / (full_boost_px - on_target_px), 1.0)
                             adaptive_max = self.aim_adaptive_max_var.get()
-                            # Boost amp: base → base * max
                             cur_amp = cur_amp * (1.0 + boost_frac * (adaptive_max - 1.0))
-                            # Reduce smooth: lerp from user value toward 1.0 (instant)
                             cur_smooth = cur_smooth + boost_frac * (1.0 - cur_smooth)
 
                     # X-only aim lock: suppress Y-axis, let player control vertical manually
-                    # With lock duration: keep full X+Y for first N ms, then release Y
                     if self.aim_x_only_var.get():
                         x_lock_dur = self.aim_x_lock_duration_var.get()
                         if x_lock_dur > 0 and aim_key_press_time > 0:
                             aim_held_ms = (time.perf_counter() - aim_key_press_time) * 1000.0
                             if aim_held_ms > x_lock_dur:
                                 rawY = 0.0
-                            # else: within lock duration, keep rawY (full X+Y)
                         else:
                             rawY = 0.0
 
                     cur_aim_mode = AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot")
                     raw_dist = (rawX**2 + rawY**2) ** 0.5
 
+                    # Reset PID when aim key just pressed (fresh start each engagement)
+                    if keyDown and not prev_aim_key:
+                        aim_pid.reset()
+
                     if cur_aim_mode == "assist":
-                        # --- Aim Assist mode ---
-                        # During rigid spray, suppress Y for assist (unless AI correction enabled)
+                        # --- Aim Assist mode (PID) ---
                         rigid_spraying_a = self._rigid_spray_active and self.rigid_recoil_var.get()
                         ai_correct = self.rigid_ai_correct_var.get()
                         if rigid_spraying_a and not ai_correct:
                             rawY = 0.0
-                        # Additive pull toward target. User keeps full mouse control.
-                        # Pull strength = proportional to offset, scaled by proximity:
-                        #   - Far from target (near FOV edge): weak pull
-                        #   - Close to target: stronger pull (helps stick)
-                        # The pull is a fraction of the offset, much weaker than aimbot.
-                        assist_fov = max(cur_fov, 100)  # effective FOV for falloff calc
-                        # Proximity factor: 1.0 when on target, ~0.2 at FOV edge
+                        # Assist uses weaker gains: scale Kp down
+                        assist_fov = max(cur_fov, 100)
                         proximity = max(0.0, 1.0 - (raw_dist / assist_fov))
-                        # Pull strength: base 15-30% of offset, boosted by proximity
-                        pull_pct = 0.15 + 0.20 * proximity  # 15% at edge → 35% on target
-                        pull_pct /= max(cur_smooth, 1.0)     # user smooth still applies
-                        moveX = rawX * pull_pct * cur_amp
-                        moveY = rawY * pull_pct * cur_amp
+                        assist_scale = 0.15 + 0.20 * proximity  # 15%~35%
+                        kp = cur_amp / max(cur_smooth, 1.0) * assist_scale
+                        ki = self.aim_ki_var.get() * assist_scale
+                        kd = self.aim_kd_var.get() * assist_scale
+                        moveX, moveY = aim_pid.compute(rawX, rawY, kp, ki, kd)
 
-                        # Softer clamp for assist (half of aimbot max)
+                        # Softer clamp for assist
                         assist_max = MAX_PIXEL_DELTA * 0.5
                         move_mag = (moveX**2 + moveY**2) ** 0.5
                         if move_mag > assist_max:
@@ -3193,23 +3197,16 @@ class VisionViewerApp:
                             moveY *= scale_f
 
                         mX, mY = round(moveX), round(moveY)
-                        # Tighter dead zone for assist
                         if abs(mX) <= 1 and abs(mY) <= 1:
                             mX, mY = 0, 0
 
                         if keyDown and (mX != 0 or mY != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
-                            mouse_cmd_history.append((time.perf_counter(), mX, mY))
                             if now_t - aim_log_timer > 1:
-                                print(f"[ASSIST] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} pull={pull_pct:.0%} move=({mX},{mY})")
+                                print(f"[ASSIST] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY})")
                                 aim_log_timer = now_t
                     else:
-                        # --- Aimbot mode (original) ---
-                        # During active spray, suppress Y-axis aim correction.
-                        # Vertical control is handled entirely by the recoil pattern;
-                        # aim only tracks horizontally (X) for spray transfer.
-                        # Exception: when AI dual-axis correction is enabled with rigid recoil,
-                        # keep Y tracking so AI can correct for target movement in real-time.
+                        # --- Aimbot mode (PID) ---
                         rigid_spraying = self._rigid_spray_active and self.rigid_recoil_var.get()
                         ai_correct = self.rigid_ai_correct_var.get()
                         lerp_spraying = (spray_start_time > 0 and cur_lmb and last_recoil_idx >= 1)
@@ -3218,20 +3215,14 @@ class VisionViewerApp:
                         elif lerp_spraying:
                             rawY = 0.0
 
-                        # Directness: when prediction is active and aim point is
-                        # externally smoothed, we can safely reduce the smooth divisor
-                        # for faster convergence. directness 0→1 lerps smooth from
-                        # user value toward 1.0 (instant).
-                        directness = self.aim_directness_var.get()
-                        if directness > 0.001 and self.aim_predict_var.get():
-                            effective_smooth = cur_smooth + directness * (1.0 - cur_smooth)
-                        else:
-                            effective_smooth = cur_smooth
-                        smooth_div = max(effective_smooth, 1.0)
-                        moveX = rawX * cur_amp / smooth_div
-                        moveY = rawY * cur_amp / smooth_div
+                        # PID gains: Kp = amp/smooth (same P behavior as before)
+                        smooth_div = max(cur_smooth, 1.0)
+                        kp = cur_amp / smooth_div
+                        ki = self.aim_ki_var.get()
+                        kd = self.aim_kd_var.get()
+                        moveX, moveY = aim_pid.compute(rawX, rawY, kp, ki, kd)
 
-                        # Clamp per-frame movement to MAX_PIXEL_DELTA (anti-overshoot)
+                        # Clamp per-frame movement to MAX_PIXEL_DELTA
                         move_mag = (moveX**2 + moveY**2) ** 0.5
                         if move_mag > MAX_PIXEL_DELTA:
                             scale_f = MAX_PIXEL_DELTA / move_mag
@@ -3240,15 +3231,14 @@ class VisionViewerApp:
 
                         mX, mY = round(moveX), round(moveY)
 
-                        # Dead zone: suppress sub-pixel jitter when nearly on target
+                        # Dead zone
                         if abs(mX) <= 1 and abs(mY) <= 1 and raw_dist < 3:
                             mX, mY = 0, 0
 
                         if keyDown and (mX != 0 or mY != 0):
                             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
-                            mouse_cmd_history.append((time.perf_counter(), mX, mY))
-                            if now_t - aim_log_timer > 1:
-                                print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) recoil_off=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
+                            if now_t - aim_log_timer > 0.5:
+                                print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} kp={kp:.3f} ki={ki:.3f} kd={kd:.3f} move=({mX},{mY}) amp={cur_amp:.2f} sm={cur_smooth:.1f}")
                                 aim_log_timer = now_t
 
                     # Attach aim point to detection for overlay dot drawing
@@ -3330,7 +3320,6 @@ class VisionViewerApp:
                     rc_my = round(recoil_current_y - recoil_accum_y)
                     if win32api is not None and (rc_mx != 0 or rc_my != 0):
                         win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, rc_mx, rc_my, 0, 0)
-                        mouse_cmd_history.append((time.perf_counter(), rc_mx, rc_my))
                     recoil_accum_x += rc_mx
                     recoil_accum_y += rc_my
 
