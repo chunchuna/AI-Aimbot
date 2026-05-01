@@ -66,6 +66,22 @@ aaAdaptive = False
 # e.g. 3.0 means amp can go up to 3x base value when target moves fast
 aaAdaptiveMax = 3.0
 
+# Target lock: stick to nearest target, avoid multi-target pull/jitter
+aaTargetLock = True
+# How many consecutive frames the locked target can be missing before switching
+aaTargetLockFrames = 8
+# Max pixel distance to consider same target between frames
+aaTargetLockRadius = 100
+
+# Overlay customization
+ovBoxThickness = 2          # Bounding box line thickness (1-6)
+ovBoxStyle = "full"         # "full" = complete rectangle, "corners" = corner brackets only
+ovCornerLen = 15            # Corner bracket length (for corners style)
+ovDot = False               # Draw aim point dot on overlay
+ovDotSize = 4               # Aim dot radius in pixels (2-12)
+ovDotStyle = "circle"       # "circle", "cross", or "diamond"
+ovDotColor = "red"          # "red", "green", "cyan", "white", "yellow", "magenta"
+
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
 aaSmoothFactor = 3.8
@@ -163,18 +179,3 @@ mouseMovementMethod = "win32"
 # Minimum pixel distance before mouse moves. Prevents jitter when on target.
 # Set to 0 to disable. Recommended: 3~8
 aaDeadZone = 5
-
-# ============ Sticky Aim (Anti Target Switching) ============
-# When enabled, locks onto the closest target and won't switch to others
-# until the current target disappears for several consecutive frames.
-stickyAimEnabled = True
-
-# How many consecutive frames the current target must be missing before switching
-# Higher = more sticky (won't switch easily), Lower = faster switching
-# Recommended: 5~15
-stickyAimFrames = 8
-
-# Maximum pixel distance to consider a detection as the "same" target between frames
-# Larger = more forgiving for fast-moving targets, Smaller = more precise tracking
-# Recommended: 50~150
-stickyAimTrackRadius = 100

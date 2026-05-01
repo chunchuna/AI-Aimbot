@@ -233,16 +233,33 @@ class OverlayWindow:
         print(f"[OVERLAY] DIB cache created: {self._width}x{self._height} BGRA")
 
     # ---- per-pixel-alpha update via UpdateLayeredWindow ----
-    def draw(self, detections, capture_region=None):
+    # Color name → BGRA tuple mapping for dot colors
+    DOT_COLORS = {
+        "red": (0, 0, 255, 255), "green": (0, 255, 0, 255), "cyan": (255, 255, 0, 255),
+        "white": (255, 255, 255, 255), "yellow": (0, 255, 255, 255), "magenta": (255, 0, 255, 255),
+    }
+
+    def draw(self, detections, capture_region=None, box_thickness=2,
+             box_style="full", corner_len=15, show_dot=False, dot_size=4,
+             dot_style="circle", dot_color="red"):
         """Draw detection boxes using UpdateLayeredWindow (per-pixel alpha).
-        detections: list of dicts with 'xyxy', optional '_color', '_label'
-        capture_region: (left, top, right, bottom) of the captured screen region"""
+        detections: list of dicts with 'xyxy', optional '_color', '_label', '_aim_x', '_aim_y'
+        capture_region: (left, top, right, bottom) of the captured screen region
+        box_thickness: line width for bounding boxes (1-6)
+        box_style: 'full' = complete rectangle, 'corners' = only draw corner brackets
+        corner_len: length of corner lines when box_style='corners'
+        show_dot: whether to draw aim point dot
+        dot_size: radius of the aim dot
+        dot_style: 'circle', 'cross', or 'diamond'
+        dot_color: color name for the aim dot
+        """
         if not self._hwnd or self._cached_arr is None:
             return
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
         arr = self._cached_arr
         mem_dc = self._cached_mem_dc
+        h, w = self._height, self._width
 
         # Re-assert TOPMOST periodically (every ~30 draw calls ≈ once per second)
         self._topmost_counter += 1
@@ -260,30 +277,83 @@ class OverlayWindow:
         if capture_region:
             ox, oy = capture_region[0] - self._left, capture_region[1] - self._top
 
-        line_thickness = 2
+        t = max(1, int(box_thickness))
+        dot_bgra = self.DOT_COLORS.get(dot_color, (0, 0, 255, 255))
 
         for d in detections:
             x1, y1, x2, y2 = d["xyxy"]
             sx1 = max(0, int(x1 + ox))
             sy1 = max(0, int(y1 + oy))
-            sx2 = min(self._width - 1, int(x2 + ox))
-            sy2 = min(self._height - 1, int(y2 + oy))
+            sx2 = min(w - 1, int(x2 + ox))
+            sy2 = min(h - 1, int(y2 + oy))
             if sx1 >= sx2 or sy1 >= sy2:
                 continue
             color_bgr = d.get("_color", (0, 0, 255))  # BGR tuple
             b, g, r = int(color_bgr[0]), int(color_bgr[1]), int(color_bgr[2])
-            a = 255  # fully opaque
+            a = 255
+            pixel = [b, g, r, a]
 
-            # Draw rectangle edges directly into the pixel buffer (fast)
-            t = line_thickness
-            # Top edge
-            arr[sy1:min(sy1+t, sy2), sx1:sx2] = [b, g, r, a]
-            # Bottom edge
-            arr[max(sy1, sy2-t):sy2, sx1:sx2] = [b, g, r, a]
-            # Left edge
-            arr[sy1:sy2, sx1:min(sx1+t, sx2)] = [b, g, r, a]
-            # Right edge
-            arr[sy1:sy2, max(sx1, sx2-t):sx2] = [b, g, r, a]
+            if box_style == "corners":
+                cl = min(corner_len, (sx2 - sx1) // 2, (sy2 - sy1) // 2)
+                # Top-left corner
+                arr[sy1:min(sy1+t, sy2), sx1:sx1+cl] = pixel
+                arr[sy1:sy1+cl, sx1:min(sx1+t, sx2)] = pixel
+                # Top-right corner
+                arr[sy1:min(sy1+t, sy2), max(sx1, sx2-cl):sx2] = pixel
+                arr[sy1:sy1+cl, max(sx1, sx2-t):sx2] = pixel
+                # Bottom-left corner
+                arr[max(sy1, sy2-t):sy2, sx1:sx1+cl] = pixel
+                arr[max(sy1, sy2-cl):sy2, sx1:min(sx1+t, sx2)] = pixel
+                # Bottom-right corner
+                arr[max(sy1, sy2-t):sy2, max(sx1, sx2-cl):sx2] = pixel
+                arr[max(sy1, sy2-cl):sy2, max(sx1, sx2-t):sx2] = pixel
+            else:
+                # Full rectangle
+                arr[sy1:min(sy1+t, sy2), sx1:sx2] = pixel  # top
+                arr[max(sy1, sy2-t):sy2, sx1:sx2] = pixel  # bottom
+                arr[sy1:sy2, sx1:min(sx1+t, sx2)] = pixel  # left
+                arr[sy1:sy2, max(sx1, sx2-t):sx2] = pixel  # right
+
+            # Draw aim dot if enabled and aim point is provided
+            if show_dot and "_aim_x" in d and "_aim_y" in d:
+                dx = int(d["_aim_x"] + ox)
+                dy = int(d["_aim_y"] + oy)
+                ds = dot_size
+                if dot_style == "circle":
+                    # Draw filled circle using distance check
+                    y_lo = max(0, dy - ds)
+                    y_hi = min(h, dy + ds + 1)
+                    x_lo = max(0, dx - ds)
+                    x_hi = min(w, dx + ds + 1)
+                    if y_hi > y_lo and x_hi > x_lo:
+                        yy = np.arange(y_lo, y_hi).reshape(-1, 1)
+                        xx = np.arange(x_lo, x_hi).reshape(1, -1)
+                        mask = ((xx - dx)**2 + (yy - dy)**2) <= ds**2
+                        region = arr[y_lo:y_hi, x_lo:x_hi]
+                        region[mask] = dot_bgra
+                elif dot_style == "cross":
+                    # Horizontal line
+                    cx1 = max(0, dx - ds)
+                    cx2 = min(w, dx + ds + 1)
+                    cy1 = max(0, dy - 1)
+                    cy2 = min(h, dy + 2)
+                    arr[cy1:cy2, cx1:cx2] = dot_bgra
+                    # Vertical line
+                    vy1 = max(0, dy - ds)
+                    vy2 = min(h, dy + ds + 1)
+                    vx1 = max(0, dx - 1)
+                    vx2 = min(w, dx + 2)
+                    arr[vy1:vy2, vx1:vx2] = dot_bgra
+                elif dot_style == "diamond":
+                    for iy in range(-ds, ds + 1):
+                        span = ds - abs(iy)
+                        py = dy + iy
+                        if py < 0 or py >= h:
+                            continue
+                        lx = max(0, dx - span)
+                        rx = min(w, dx + span + 1)
+                        if rx > lx:
+                            arr[py, lx:rx] = dot_bgra
 
             # Draw label text using GDI on mem_dc (supports Unicode)
             label = d.get("_label", "")
@@ -298,7 +368,7 @@ class OverlayWindow:
                 # DrawTextW writes RGB but leaves alpha=0 → fix alpha for text pixels
                 lbl_h = min(16, sy1 - lbl_y) if sy1 > lbl_y else 0
                 if lbl_h > 0:
-                    text_region = arr[lbl_y:lbl_y + lbl_h, sx1:min(sx2 + 100, self._width)]
+                    text_region = arr[lbl_y:lbl_y + lbl_h, sx1:min(sx2 + 100, w)]
                     mask = (text_region[:, :, 0].astype(np.uint16) +
                             text_region[:, :, 1].astype(np.uint16) +
                             text_region[:, :, 2].astype(np.uint16)) > 0
@@ -616,6 +686,18 @@ class VisionViewerApp:
         self.visuals_var = tk.BooleanVar(value=True)
         self.overlay_var = tk.BooleanVar(value=False)
         self._overlay = None  # OverlayWindow instance, created on demand
+        # Overlay customization
+        self.ov_box_thickness_var = tk.IntVar(value=_read_config_value("ovBoxThickness", 2, int))
+        self.ov_box_style_var = tk.StringVar(value=_read_config_value("ovBoxStyle", "full", str))  # full / corners
+        self.ov_corner_len_var = tk.IntVar(value=_read_config_value("ovCornerLen", 15, int))
+        self.ov_dot_var = tk.BooleanVar(value=_read_config_value("ovDot", False, bool))
+        self.ov_dot_size_var = tk.IntVar(value=_read_config_value("ovDotSize", 4, int))
+        self.ov_dot_style_var = tk.StringVar(value=_read_config_value("ovDotStyle", "circle", str))  # circle / cross / diamond
+        self.ov_dot_color_var = tk.StringVar(value=_read_config_value("ovDotColor", "red", str))  # red / green / cyan / white / yellow
+        # Target lock: lock nearest target, ignore others
+        self.aim_target_lock_var = tk.BooleanVar(value=_read_config_value("aaTargetLock", True, bool))
+        self.aim_target_lock_frames_var = tk.IntVar(value=_read_config_value("aaTargetLockFrames", 8, int))
+        self.aim_target_lock_radius_var = tk.IntVar(value=_read_config_value("aaTargetLockRadius", 100, int))
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
         self.screenshot_size_var = tk.IntVar(value=_read_config_value("screenShotHeight", 320, int))
@@ -865,6 +947,71 @@ class VisionViewerApp:
                          command=self._update_status_labels).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="显示预览窗口", variable=self.visuals_var).pack(anchor="w", pady=2)
         ttk.Checkbutton(right, text="屏幕叠加层 (Overlay)", variable=self.overlay_var).pack(anchor="w", pady=2)
+
+        # --- Overlay customization ---
+        ov_frame = ttk.LabelFrame(right, text="Overlay 外观设置")
+        ov_frame.pack(fill="x", pady=4, padx=2)
+
+        f_ovt = ttk.Frame(ov_frame); f_ovt.pack(fill="x", pady=1)
+        ttk.Label(f_ovt, text="方框粗细:").pack(side="left")
+        self.ov_thickness_label = ttk.Label(f_ovt, text=str(self.ov_box_thickness_var.get()))
+        self.ov_thickness_label.pack(side="right")
+        tk.Scale(ov_frame, from_=1, to=6, orient="horizontal", variable=self.ov_box_thickness_var,
+                 command=lambda v: self.ov_thickness_label.configure(text=str(int(float(v))))).pack(fill="x")
+
+        f_ovs = ttk.Frame(ov_frame); f_ovs.pack(fill="x", pady=1)
+        ttk.Label(f_ovs, text="方框样式:").pack(side="left")
+        ttk.Combobox(f_ovs, textvariable=self.ov_box_style_var,
+                     values=["full", "corners"], state="readonly", width=10).pack(side="right")
+
+        f_ovcl = ttk.Frame(ov_frame); f_ovcl.pack(fill="x", pady=1)
+        ttk.Label(f_ovcl, text="转角长度:").pack(side="left")
+        self.ov_corner_label = ttk.Label(f_ovcl, text=str(self.ov_corner_len_var.get()))
+        self.ov_corner_label.pack(side="right")
+        tk.Scale(ov_frame, from_=5, to=40, orient="horizontal", variable=self.ov_corner_len_var,
+                 command=lambda v: self.ov_corner_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(ov_frame, text="corners模式下转角线段长度", font=("", 8)).pack(anchor="w")
+
+        ttk.Separator(ov_frame, orient="horizontal").pack(fill="x", pady=3)
+
+        ttk.Checkbutton(ov_frame, text="绘制瞄准点", variable=self.ov_dot_var).pack(anchor="w", pady=1)
+
+        f_ovds = ttk.Frame(ov_frame); f_ovds.pack(fill="x", pady=1)
+        ttk.Label(f_ovds, text="瞄点样式:").pack(side="left")
+        ttk.Combobox(f_ovds, textvariable=self.ov_dot_style_var,
+                     values=["circle", "cross", "diamond"], state="readonly", width=10).pack(side="right")
+
+        f_ovdc = ttk.Frame(ov_frame); f_ovdc.pack(fill="x", pady=1)
+        ttk.Label(f_ovdc, text="瞄点颜色:").pack(side="left")
+        ttk.Combobox(f_ovdc, textvariable=self.ov_dot_color_var,
+                     values=["red", "green", "cyan", "white", "yellow", "magenta"], state="readonly", width=10).pack(side="right")
+
+        f_ovdz = ttk.Frame(ov_frame); f_ovdz.pack(fill="x", pady=1)
+        ttk.Label(f_ovdz, text="瞄点大小:").pack(side="left")
+        self.ov_dot_size_label = ttk.Label(f_ovdz, text=str(self.ov_dot_size_var.get()))
+        self.ov_dot_size_label.pack(side="right")
+        tk.Scale(ov_frame, from_=2, to=12, orient="horizontal", variable=self.ov_dot_size_var,
+                 command=lambda v: self.ov_dot_size_label.configure(text=str(int(float(v))))).pack(fill="x")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=4)
+
+        # --- Target lock (anti-pull) ---
+        ttk.Checkbutton(right, text="目标锁定 (避免多目标拉扯)", variable=self.aim_target_lock_var).pack(anchor="w", pady=2)
+        f_tlf = ttk.Frame(right); f_tlf.pack(fill="x", pady=1)
+        ttk.Label(f_tlf, text="丢失帧数:").pack(side="left")
+        self.tl_frames_label = ttk.Label(f_tlf, text=str(self.aim_target_lock_frames_var.get()))
+        self.tl_frames_label.pack(side="right")
+        tk.Scale(right, from_=3, to=30, orient="horizontal", variable=self.aim_target_lock_frames_var,
+                 command=lambda v: self.tl_frames_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="目标消失多少帧后才切换 越大越不容易切目标", font=("", 8)).pack(anchor="w")
+
+        f_tlr = ttk.Frame(right); f_tlr.pack(fill="x", pady=1)
+        ttk.Label(f_tlr, text="追踪半径:").pack(side="left")
+        self.tl_radius_label = ttk.Label(f_tlr, text=str(self.aim_target_lock_radius_var.get()))
+        self.tl_radius_label.pack(side="right")
+        tk.Scale(right, from_=30, to=200, orient="horizontal", variable=self.aim_target_lock_radius_var,
+                 command=lambda v: self.tl_radius_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="帧间目标匹配距离 越大容忍快速移动", font=("", 8)).pack(anchor="w")
 
         # Start a periodic status label updater (catches hotkey toggles too)
         self._update_status_labels()
@@ -1510,6 +1657,16 @@ class VisionViewerApp:
             "aaAlwaysAim": self.aim_always_var.get(),
             "aaAdaptive": self.aim_adaptive_var.get(),
             "aaAdaptiveMax": round(self.aim_adaptive_max_var.get(), 1),
+            "aaTargetLock": self.aim_target_lock_var.get(),
+            "aaTargetLockFrames": self.aim_target_lock_frames_var.get(),
+            "aaTargetLockRadius": self.aim_target_lock_radius_var.get(),
+            "ovBoxThickness": self.ov_box_thickness_var.get(),
+            "ovBoxStyle": self.ov_box_style_var.get(),
+            "ovCornerLen": self.ov_corner_len_var.get(),
+            "ovDot": self.ov_dot_var.get(),
+            "ovDotSize": self.ov_dot_size_var.get(),
+            "ovDotStyle": self.ov_dot_style_var.get(),
+            "ovDotColor": self.ov_dot_color_var.get(),
             "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -1581,6 +1738,26 @@ class VisionViewerApp:
             self.aim_adaptive_var.set(bool(vals["aaAdaptive"]))
         if "aaAdaptiveMax" in vals:
             self.aim_adaptive_max_var.set(float(vals["aaAdaptiveMax"]))
+        if "aaTargetLock" in vals:
+            self.aim_target_lock_var.set(bool(vals["aaTargetLock"]))
+        if "aaTargetLockFrames" in vals:
+            self.aim_target_lock_frames_var.set(int(vals["aaTargetLockFrames"]))
+        if "aaTargetLockRadius" in vals:
+            self.aim_target_lock_radius_var.set(int(vals["aaTargetLockRadius"]))
+        if "ovBoxThickness" in vals:
+            self.ov_box_thickness_var.set(int(vals["ovBoxThickness"]))
+        if "ovBoxStyle" in vals:
+            self.ov_box_style_var.set(str(vals["ovBoxStyle"]))
+        if "ovCornerLen" in vals:
+            self.ov_corner_len_var.set(int(vals["ovCornerLen"]))
+        if "ovDot" in vals:
+            self.ov_dot_var.set(bool(vals["ovDot"]))
+        if "ovDotSize" in vals:
+            self.ov_dot_size_var.set(int(vals["ovDotSize"]))
+        if "ovDotStyle" in vals:
+            self.ov_dot_style_var.set(str(vals["ovDotStyle"]))
+        if "ovDotColor" in vals:
+            self.ov_dot_color_var.set(str(vals["ovDotColor"]))
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
@@ -2253,6 +2430,10 @@ class VisionViewerApp:
         prev_target_time = 0.0
         target_velocity = 0.0      # smoothed pixels/sec
 
+        # Target lock: stick to one target to avoid multi-target pull
+        locked_target_pos = None    # (mid_x, mid_y) of locked target
+        locked_miss_count = 0       # consecutive frames target not found
+
         # Triggerbot state
         trigger_on_target_since = 0.0  # timestamp when crosshair first entered a target box
         trigger_fired = False          # whether we already fired for this "on-target" episode
@@ -2700,6 +2881,10 @@ class VisionViewerApp:
                 aim_key_press_time = time.perf_counter()
             elif not keyDown:
                 aim_key_press_time = 0.0
+                # Reset target lock when aim key released (fresh lock next engagement)
+                if prev_aim_key and self.aim_target_lock_var.get():
+                    locked_target_pos = None
+                    locked_miss_count = 0
             prev_aim_key = keyDown
 
             # Keep unfiltered targets for triggerbot (FOV is aim-only concept)
@@ -2722,6 +2907,44 @@ class VisionViewerApp:
                         perf_count = 0
                     print(f"[DEBUG] targets={len(targets)} key_down={keyDown} fov={cur_fov} smooth={cur_smooth} amp={cur_amp} y_off={cur_y_offset}")
                     debug_timer = now_t
+
+                # --- Target lock: stick to one target, avoid multi-target pull ---
+                if self.aim_target_lock_var.get() and len(targets) > 0:
+                    tl_radius = self.aim_target_lock_radius_var.get()
+                    tl_max_miss = self.aim_target_lock_frames_var.get()
+                    if locked_target_pos is not None:
+                        # Try to find the same target by proximity to last known position
+                        best_match = None
+                        best_match_dist = float("inf")
+                        lx, ly = locked_target_pos
+                        for tgt in targets:
+                            d_tl = ((tgt["mid_x"] - lx)**2 + (tgt["mid_y"] - ly)**2) ** 0.5
+                            if d_tl < best_match_dist:
+                                best_match_dist = d_tl
+                                best_match = tgt
+                        if best_match is not None and best_match_dist <= tl_radius:
+                            # Found the same target — move it to front
+                            locked_target_pos = (best_match["mid_x"], best_match["mid_y"])
+                            locked_miss_count = 0
+                            targets.remove(best_match)
+                            targets.insert(0, best_match)
+                        else:
+                            # Target not found this frame
+                            locked_miss_count += 1
+                            if locked_miss_count >= tl_max_miss:
+                                # Lost target for too long — release lock, pick nearest
+                                locked_target_pos = (targets[0]["mid_x"], targets[0]["mid_y"])
+                                locked_miss_count = 0
+                    else:
+                        # No lock yet — lock onto nearest target
+                        locked_target_pos = (targets[0]["mid_x"], targets[0]["mid_y"])
+                        locked_miss_count = 0
+                elif len(targets) == 0:
+                    locked_miss_count += 1
+                    tl_max_miss = self.aim_target_lock_frames_var.get()
+                    if locked_miss_count >= tl_max_miss:
+                        locked_target_pos = None
+                        locked_miss_count = 0
 
                 if len(targets) > 0:
                     t = targets[0]
@@ -2884,6 +3107,10 @@ class VisionViewerApp:
                                 print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY}) recoil_off=({recoil_accum_x:.0f},{recoil_accum_y:.0f})")
                                 aim_log_timer = now_t
 
+                    # Attach aim point to detection for overlay dot drawing
+                    t["_aim_x"] = aim_x_abs
+                    t["_aim_y"] = aim_y_abs
+
                     if display is not None:
                         cv2.circle(display, (int(aim_x_abs), int(aim_y_abs)), 5, (0, 0, 255), -1)
 
@@ -3037,7 +3264,14 @@ class VisionViewerApp:
 
             # --- Overlay drawing ---
             if do_render and use_overlay and self._overlay is not None:
-                self._overlay.draw(all_dets, capture_region)
+                self._overlay.draw(all_dets, capture_region,
+                                   box_thickness=self.ov_box_thickness_var.get(),
+                                   box_style=self.ov_box_style_var.get(),
+                                   corner_len=self.ov_corner_len_var.get(),
+                                   show_dot=self.ov_dot_var.get(),
+                                   dot_size=self.ov_dot_size_var.get(),
+                                   dot_style=self.ov_dot_style_var.get(),
+                                   dot_color=self.ov_dot_color_var.get())
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 
