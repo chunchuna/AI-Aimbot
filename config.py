@@ -9,7 +9,7 @@ maskWidth = 80
 maskHeight = 200
 
 # Autoaim mouse movement amplifier
-aaMovementAmp = 0.8
+aaMovementAmp = 2.0
 
 # Person Class Confidence
 confidence = 0.3
@@ -49,12 +49,12 @@ aaTeamFilter = "all"
 aaAimMode = "aimbot"
 
 # X-axis only aim lock (True = only track horizontal, Y-axis left to player for manual recoil)
-aaXOnly = True
+aaXOnly = False
 
 # X-lock duration in ms: when aaXOnly is on, keep full X+Y lock for this many ms first
 # After this duration, release Y-axis to player for manual recoil control
 # 0 = always X-only (no initial lock), 200 = lock head for 200ms then release Y
-aaXLockDuration = 450
+aaXLockDuration = 0
 
 # Always-aim: always track targets without needing to hold aim key
 aaAlwaysAim = False
@@ -76,7 +76,7 @@ aaTargetLockRadius = 100
 # PID controller: Ki (integral gain) — eliminates steady-state tracking error
 # on moving targets. Without Ki, pure P-control always lags behind.
 # 0 = pure P (old behavior), 0.05~0.3 = good tracking. Too high = oscillation.
-aaKi = 1.0
+aaKi = 10.0
 
 # PID controller: Kd (derivative gain) — dampens overshoot and oscillation
 # 0 = no damping, 0.02~0.1 = smooth arrival. Too high = sluggish.
@@ -94,12 +94,12 @@ ovDotStyle = "diamond"
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.0
-aaFOV = 122
+aaSmoothFactor = 2.5
+aaFOV = 53
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -21
+crosshairYOffset = -12
 
 # Screen capture FPS (30-500)
 captureFPS = 266
@@ -131,7 +131,7 @@ recoilAimOnly = True
 recoilHoldMs = 100
 
 # Show overlay window (game-overlay style boxes/dots)
-showOverlay = True
+showOverlay = False
 
 # Toggle hotkeys (press once to enable, press again to disable)
 # F5=0x74, F6=0x75, F7=0x76, F8=0x77, etc.

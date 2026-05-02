@@ -130,29 +130,32 @@ class AimPID:
 
         # --- Integral (accumulated error) ---
         # Only accumulate when: (a) past soft-start, AND (b) error is small.
-        # Large errors (> 30px) are handled by P alone — accumulating integral
-        # during the initial approach would cause overshoot / fling.
-        # Integral's job is to fix persistent SMALL tracking offsets on moving targets.
+        # Large errors are handled by P alone — integral only fixes
+        # persistent SMALL tracking offsets on moving targets.
         err_mag = (error_x**2 + error_y**2) ** 0.5
-        if self._frame_count > RAMP_FRAMES and err_mag < 30.0:
+        if self._frame_count > RAMP_FRAMES and err_mag < 20.0:
             self._integral_x += error_x * dt
             self._integral_y += error_y * dt
 
-        # Anti-windup clamp
-        INTEGRAL_MAX = 50.0
+        # Anti-windup: clamp so that Ki * integral can never exceed ~30px of output.
+        # This prevents high Ki values from pushing aim far off-target.
+        safe_ki = max(ki, 0.1)
+        INTEGRAL_MAX = min(50.0, 30.0 / safe_ki)
         self._integral_x = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral_x))
         self._integral_y = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral_y))
 
         # Direction reversal with large error: overshoot, halve integral
-        if error_x * self._prev_error_x < 0 and abs(error_x) > 10.0:
-            self._integral_x *= 0.5
-        if error_y * self._prev_error_y < 0 and abs(error_y) > 10.0:
-            self._integral_y *= 0.5
+        if error_x * self._prev_error_x < 0 and abs(error_x) > 8.0:
+            self._integral_x *= 0.3
+        if error_y * self._prev_error_y < 0 and abs(error_y) > 8.0:
+            self._integral_y *= 0.3
 
-        # Decay integral when very close to target (< 5px)
-        if err_mag < 5.0:
-            self._integral_x *= 0.7
-            self._integral_y *= 0.7
+        # Decay integral when near target — stronger decay as we get closer
+        if err_mag < 20.0:
+            # At 0px → decay=0.5, at 20px → decay=1.0 (no decay)
+            decay = 0.5 + 0.5 * (err_mag / 20.0)
+            self._integral_x *= decay
+            self._integral_y *= decay
 
         # --- Derivative (frame-based, NOT divided by dt) ---
         deriv_x = error_x - self._prev_error_x
@@ -1153,8 +1156,8 @@ class VisionViewerApp:
         ttk.Label(f_ki, text="Ki (积分):").pack(side="left")
         self.ki_label = ttk.Label(f_ki, text=f"{self.aim_ki_var.get():.2f}")
         self.ki_label.pack(side="right")
-        tk.Scale(right, from_=0.0, to=10.0, orient="horizontal", variable=self.aim_ki_var,
-                 resolution=0.1, command=lambda v: self.ki_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
+        tk.Scale(right, from_=0.0, to=100.0, orient="horizontal", variable=self.aim_ki_var,
+                 resolution=1.0, command=lambda v: self.ki_label.configure(text=f"{float(v):.0f}")).pack(fill="x")
         ttk.Label(right, text="消除移动目标跟踪偏差 0=纯P 高smooth时需更大Ki", font=("", 8)).pack(anchor="w")
 
         f_kd = ttk.Frame(right); f_kd.pack(fill="x", pady=1)
