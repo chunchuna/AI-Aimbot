@@ -379,7 +379,8 @@ class OverlayWindow:
 
     def draw(self, detections, capture_region=None, box_thickness=2,
              box_style="full", corner_len=15, show_dot=False, dot_size=4,
-             dot_style="circle", dot_color="red", hide_label=False):
+             dot_style="circle", dot_color="red", hide_label=False,
+             fov_radius=0):
         """Draw detection boxes using UpdateLayeredWindow (per-pixel alpha).
         detections: list of dicts with 'xyxy', optional '_color', '_label', '_aim_x', '_aim_y'
         capture_region: (left, top, right, bottom) of the captured screen region
@@ -390,6 +391,7 @@ class OverlayWindow:
         dot_size: radius of the aim dot
         dot_style: 'circle', 'cross', or 'diamond'
         dot_color: color name for the aim dot
+        fov_radius: if >0, draw a FOV circle at screen center with this pixel radius
         """
         if not self._hwnd or self._cached_arr is None:
             return
@@ -511,6 +513,28 @@ class OverlayWindow:
                             text_region[:, :, 1].astype(np.uint16) +
                             text_region[:, :, 2].astype(np.uint16)) > 0
                     text_region[:, :, 3] = np.where(mask, 255, text_region[:, :, 3])
+
+        # Draw FOV circle at screen center
+        if fov_radius > 0:
+            # Screen center (primary monitor)
+            cx = w // 2
+            cy = h // 2
+            r = int(fov_radius)
+            fov_t = max(1, int(box_thickness))  # reuse box thickness for circle line width
+            fov_pixel = [255, 255, 255, 120]  # BGRA: white, semi-transparent
+            # Vectorized ring: scan bounding box, keep pixels where abs(dist - r) < thickness/2
+            y_lo = max(0, cy - r - fov_t)
+            y_hi = min(h, cy + r + fov_t + 1)
+            x_lo = max(0, cx - r - fov_t)
+            x_hi = min(w, cx + r + fov_t + 1)
+            if y_hi > y_lo and x_hi > x_lo:
+                yy = np.arange(y_lo, y_hi).reshape(-1, 1)
+                xx = np.arange(x_lo, x_hi).reshape(1, -1)
+                dist_sq = (xx - cx) ** 2 + (yy - cy) ** 2
+                r_inner = max(0, r - fov_t)
+                r_outer = r + fov_t
+                mask = (dist_sq >= r_inner ** 2) & (dist_sq <= r_outer ** 2)
+                arr[y_lo:y_hi, x_lo:x_hi][mask] = fov_pixel
 
         # Commit to screen via UpdateLayeredWindow
         user32.UpdateLayeredWindow(self._hwnd, self._screen_dc,
@@ -820,6 +844,10 @@ class VisionViewerApp:
         # Adaptive aim: dynamically boost amp when target moves fast
         self.aim_adaptive_var = tk.BooleanVar(value=_read_config_value("aaAdaptive", False, bool))
         self.aim_adaptive_max_var = tk.DoubleVar(value=_read_config_value("aaAdaptiveMax", 3.0, float))
+        # Dynamic FOV: scale FOV based on target distance (box height)
+        self.dyn_fov_var = tk.BooleanVar(value=_read_config_value("aaDynFOV", False, bool))
+        self.dyn_fov_min_var = tk.IntVar(value=_read_config_value("aaDynFOVMin", 50, int))
+        self.dyn_fov_max_var = tk.IntVar(value=_read_config_value("aaDynFOVMax", 300, int))
 
         self.visuals_var = tk.BooleanVar(value=_read_config_value("visuals", True, bool))
         self.overlay_var = tk.BooleanVar(value=_read_config_value("showOverlay", False, bool))
@@ -833,6 +861,7 @@ class VisionViewerApp:
         self.ov_dot_style_var = tk.StringVar(value=_read_config_value("ovDotStyle", "circle", str))  # circle / cross / diamond
         self.ov_dot_color_var = tk.StringVar(value=_read_config_value("ovDotColor", "red", str))  # red / green / cyan / white / yellow
         self.ov_hide_label_var = tk.BooleanVar(value=_read_config_value("ovHideLabel", False, bool))
+        self.ov_fov_circle_var = tk.BooleanVar(value=_read_config_value("ovFovCircle", False, bool))
         # Target lock: lock nearest target, ignore others
         self.aim_target_lock_var = tk.BooleanVar(value=_read_config_value("aaTargetLock", True, bool))
         self.aim_target_lock_frames_var = tk.IntVar(value=_read_config_value("aaTargetLockFrames", 8, int))
@@ -1154,6 +1183,10 @@ class VisionViewerApp:
         tk.Scale(ov_frame, from_=2, to=12, orient="horizontal", variable=self.ov_dot_size_var,
                  command=lambda v: self.ov_dot_size_label.configure(text=str(int(float(v))))).pack(fill="x")
 
+        ttk.Separator(ov_frame, orient="horizontal").pack(fill="x", pady=3)
+        ttk.Checkbutton(ov_frame, text="绘制FOV圆圈 (实时显示自瞄范围)", variable=self.ov_fov_circle_var).pack(anchor="w", pady=1)
+        ttk.Label(ov_frame, text="在屏幕中心绘制FOV范围圆 支持动态FOV", font=("", 8)).pack(anchor="w")
+
         # ===== Switch back to AIM tab =====
         right = tab_aim
 
@@ -1267,6 +1300,22 @@ class VisionViewerApp:
         tk.Scale(right, from_=0, to=500, orient="horizontal", variable=self.fov_var,
                  command=lambda v: self.fov_label.configure(text=str(int(float(v))))).pack(fill="x")
         ttk.Label(right, text="0=无限制  推荐100~300", font=("", 8)).pack(anchor="w")
+
+        # Dynamic FOV
+        ttk.Checkbutton(right, text="动态FOV (根据目标距离自动调整)", variable=self.dyn_fov_var).pack(anchor="w", pady=2)
+        f_dfov1 = ttk.Frame(right); f_dfov1.pack(fill="x", pady=2)
+        ttk.Label(f_dfov1, text="远处FOV(最小):").pack(side="left")
+        self.dyn_fov_min_label = ttk.Label(f_dfov1, text=str(self.dyn_fov_min_var.get()))
+        self.dyn_fov_min_label.pack(side="right")
+        tk.Scale(right, from_=10, to=300, orient="horizontal", variable=self.dyn_fov_min_var,
+                 command=lambda v: self.dyn_fov_min_label.configure(text=str(int(float(v))))).pack(fill="x")
+        f_dfov2 = ttk.Frame(right); f_dfov2.pack(fill="x", pady=2)
+        ttk.Label(f_dfov2, text="近处FOV(最大):").pack(side="left")
+        self.dyn_fov_max_label = ttk.Label(f_dfov2, text=str(self.dyn_fov_max_var.get()))
+        self.dyn_fov_max_label.pack(side="right")
+        tk.Scale(right, from_=50, to=500, orient="horizontal", variable=self.dyn_fov_max_var,
+                 command=lambda v: self.dyn_fov_max_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="近处目标框大→大FOV  远处目标框小→小FOV", font=("", 8)).pack(anchor="w")
 
         # Smooth
         f4 = ttk.Frame(right); f4.pack(fill="x", pady=2)
@@ -1864,6 +1913,9 @@ class VisionViewerApp:
                 print(f"[CONFIG WARNING] {cfg_name}: GUI value {gui_val!r} not in options, will use fallback default!")
         return {
             "aaFOV": self.fov_var.get(),
+            "aaDynFOV": self.dyn_fov_var.get(),
+            "aaDynFOVMin": self.dyn_fov_min_var.get(),
+            "aaDynFOVMax": self.dyn_fov_max_var.get(),
             "aaXOnly": self.aim_x_only_var.get(),
             "aaXLockDuration": self.aim_x_lock_duration_var.get(),
             "aaAlwaysAim": self.aim_always_var.get(),
@@ -1883,6 +1935,7 @@ class VisionViewerApp:
             "ovDotStyle": self.ov_dot_style_var.get(),
             "ovDotColor": self.ov_dot_color_var.get(),
             "ovHideLabel": self.ov_hide_label_var.get(),
+            "ovFovCircle": self.ov_fov_circle_var.get(),
             "aaAimMode": AIM_MODE_OPTIONS.get(self.aim_mode_var.get(), "aimbot"),
             "aaTargetPart": TARGET_OPTIONS.get(self.target_var.get(), "head"),
             "aaSmoothFactor": round(self.smooth_var.get(), 1),
@@ -1948,6 +2001,12 @@ class VisionViewerApp:
                 print(f"[CONFIG APPLY] {k} = {vals[k]!r}")
         if "aaFOV" in vals:
             self.fov_var.set(int(vals["aaFOV"]))
+        if "aaDynFOV" in vals:
+            self.dyn_fov_var.set(bool(vals["aaDynFOV"]))
+        if "aaDynFOVMin" in vals:
+            self.dyn_fov_min_var.set(int(vals["aaDynFOVMin"]))
+        if "aaDynFOVMax" in vals:
+            self.dyn_fov_max_var.set(int(vals["aaDynFOVMax"]))
         if "aaXOnly" in vals:
             self.aim_x_only_var.set(bool(vals["aaXOnly"]))
         if "aaXLockDuration" in vals:
@@ -1987,6 +2046,8 @@ class VisionViewerApp:
             self.ov_dot_color_var.set(str(vals["ovDotColor"]))
         if "ovHideLabel" in vals:
             self.ov_hide_label_var.set(bool(vals["ovHideLabel"]))
+        if "ovFovCircle" in vals:
+            self.ov_fov_circle_var.set(bool(vals["ovFovCircle"]))
         if "aaTargetPart" in vals:
             v = vals["aaTargetPart"]
             self.target_var.set(TARGET_VALUE_TO_NAME.get(v, "头部 (Head)"))
@@ -2701,6 +2762,9 @@ class VisionViewerApp:
             # ----- Read LIVE config from tkinter vars (real-time, no restart) -----
             use_color_mode = self.color_mode_var.get()
             cur_fov = self.fov_var.get()
+            cur_dyn_fov = self.dyn_fov_var.get()
+            cur_dyn_fov_min = self.dyn_fov_min_var.get()
+            cur_dyn_fov_max = self.dyn_fov_max_var.get()
             cur_smooth = self.smooth_var.get()
             cur_amp = self.amp_var.get()
             cur_conf = self.conf_var.get()
@@ -3116,7 +3180,20 @@ class VisionViewerApp:
 
             if win32api is not None and aim_on and len(targets) > 0:
                 targets.sort(key=lambda t: t["dist"])
-                if cur_fov > 0:
+                if cur_dyn_fov and cur_dyn_fov_max > cur_dyn_fov_min:
+                    # Dynamic FOV: per-target FOV based on box_h (distance proxy)
+                    # _ref_h = expected max box_h for a close target (~40% of capture)
+                    _ref_h = float(max(_ss * 0.4, 40))
+                    _fov_filtered = []
+                    for t in targets:
+                        # ratio: 0.0 (tiny box = far) → 1.0 (large box = close)
+                        ratio = min(t["box_h"] / _ref_h, 1.0)
+                        # near (big box) → big FOV, far (small box) → small FOV
+                        t_fov = cur_dyn_fov_min + ratio * (cur_dyn_fov_max - cur_dyn_fov_min)
+                        if t["dist"] <= t_fov:
+                            _fov_filtered.append(t)
+                    targets = _fov_filtered
+                elif cur_fov > 0:
                     targets = [t for t in targets if t["dist"] <= cur_fov]
 
                 # Debug log every second
@@ -3129,7 +3206,17 @@ class VisionViewerApp:
                         print(f"[PERF] actual_fps={perf_count} capture={avg_cap:.1f}ms infer={avg_inf:.1f}ms total={avg_tot:.1f}ms")
                         perf_capture_ms = perf_infer_ms = perf_total_ms = 0.0
                         perf_count = 0
-                    print(f"[DEBUG] targets={len(targets)} key_down={keyDown} fov={cur_fov} smooth={cur_smooth} amp={cur_amp} y_off={cur_y_offset}")
+                    if cur_dyn_fov and len(targets) > 0:
+                        _rh = float(max(_ss * 0.4, 40))
+                        _t0 = targets[0]
+                        _r = min(_t0["box_h"] / _rh, 1.0)
+                        _tf = cur_dyn_fov_min + _r * (cur_dyn_fov_max - cur_dyn_fov_min)
+                        _fov_info = f"dyn_fov={cur_dyn_fov_min}~{cur_dyn_fov_max} ref_h={_rh:.0f} box_h={_t0['box_h']:.0f} ratio={_r:.2f} t_fov={_tf:.0f}"
+                    elif cur_dyn_fov:
+                        _fov_info = f"dyn_fov={cur_dyn_fov_min}~{cur_dyn_fov_max}(no targets)"
+                    else:
+                        _fov_info = f"fov={cur_fov}"
+                    print(f"[DEBUG] targets={len(targets)} key_down={keyDown} {_fov_info} smooth={cur_smooth} amp={cur_amp} y_off={cur_y_offset}")
                     debug_timer = now_t
 
                 # --- Target lock: stick to one target, avoid multi-target pull ---
@@ -3474,6 +3561,19 @@ class VisionViewerApp:
 
             # --- Overlay drawing ---
             if do_render and use_overlay and self._overlay is not None:
+                # Compute FOV circle radius for overlay
+                _ov_fov_r = 0
+                if self.ov_fov_circle_var.get():
+                    if cur_dyn_fov and cur_dyn_fov_max > cur_dyn_fov_min:
+                        if len(targets) > 0:
+                            # Show FOV computed for nearest target
+                            _rh = float(max(_ss * 0.4, 40))
+                            _ratio = min(targets[0]["box_h"] / _rh, 1.0)
+                            _ov_fov_r = cur_dyn_fov_min + _ratio * (cur_dyn_fov_max - cur_dyn_fov_min)
+                        else:
+                            _ov_fov_r = cur_dyn_fov_max  # no target: show max range
+                    elif cur_fov > 0:
+                        _ov_fov_r = cur_fov
                 self._overlay.draw(all_dets, capture_region,
                                    box_thickness=self.ov_box_thickness_var.get(),
                                    box_style=self.ov_box_style_var.get(),
@@ -3482,7 +3582,8 @@ class VisionViewerApp:
                                    dot_size=self.ov_dot_size_var.get(),
                                    dot_style=self.ov_dot_style_var.get(),
                                    dot_color=self.ov_dot_color_var.get(),
-                                   hide_label=self.ov_hide_label_var.get())
+                                   hide_label=self.ov_hide_label_var.get(),
+                                   fov_radius=_ov_fov_r)
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 

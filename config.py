@@ -49,7 +49,7 @@ aaTeamFilter = "all"
 aaAimMode = "aimbot"
 
 # X-axis only aim lock (True = only track horizontal, Y-axis left to player for manual recoil)
-aaXOnly = False
+aaXOnly = True
 
 # X-lock duration in ms: when aaXOnly is on, keep full X+Y lock for this many ms first
 # After this duration, release Y-axis to player for manual recoil control
@@ -98,18 +98,22 @@ ovDotColor = "magenta"
 ovHideLabel = True
 ovDotSize = 2
 ovDotStyle = "diamond"
+ovFovCircle = True
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 1.7
-aaFOV = 80
+aaSmoothFactor = 1.3
+aaFOV = 106
+
+# Dynamic FOV: auto-scale FOV based on target distance (box height)
+# Near targets (big box) get larger FOV, far targets (small box) get smaller FOV
+aaDynFOV = True
+aaDynFOVMin = 31
+aaDynFOVMax = 500
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
 crosshairYOffset = -8
-
-# Screen capture FPS (30-500)
-captureFPS = 292
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
 recoilWeapon = "AK-47"
