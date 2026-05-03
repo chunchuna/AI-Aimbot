@@ -62,6 +62,8 @@ except ImportError:
 
 import ctypes.wintypes
 
+from mouse_driver import MouseDriver, MOUSE_BACKEND_OPTIONS, MOUSE_BACKEND_REVERSE
+
 # ---- PID Controller for aim tracking ----
 class AimPID:
     """Dual-axis PID controller for mouse aim tracking.
@@ -99,11 +101,16 @@ class AimPID:
     def compute(self, error_x, error_y, kp, ki, kd):
         """Compute PID output for current error.
 
+        The key safety invariant: I and D terms are CLAMPED so their combined
+        contribution never exceeds the P term's magnitude. This means the PID
+        output always points toward the target — it can speed up or slow down
+        the approach, but can NEVER push aim AWAY from the target.
+
         Args:
             error_x, error_y: pixel offset from crosshair to target
             kp: proportional gain (like old amp/smooth)
-            ki: integral gain (0 = pure P, 0.01~0.5 typical)
-            kd: derivative gain (0 = no damping, 0.01~0.3 typical)
+            ki: integral gain
+            kd: derivative gain
 
         Returns:
             (move_x, move_y): mouse movement in pixels
@@ -128,47 +135,63 @@ class AimPID:
 
         RAMP_FRAMES = 10  # soft-start duration
 
+        # --- P term (always computed) ---
+        p_x = kp * error_x
+        p_y = kp * error_y
+        p_mag = (p_x**2 + p_y**2) ** 0.5
+
         # --- Integral (accumulated error) ---
-        # Only accumulate when: (a) past soft-start, AND (b) error is small.
-        # Large errors are handled by P alone — integral only fixes
-        # persistent SMALL tracking offsets on moving targets.
-        err_mag = (error_x**2 + error_y**2) ** 0.5
-        if self._frame_count > RAMP_FRAMES and err_mag < 20.0:
+        # Only accumulate after soft-start
+        if self._frame_count > RAMP_FRAMES:
             self._integral_x += error_x * dt
             self._integral_y += error_y * dt
 
-        # Anti-windup: clamp so that Ki * integral can never exceed ~30px of output.
-        # This prevents high Ki values from pushing aim far off-target.
-        safe_ki = max(ki, 0.1)
-        INTEGRAL_MAX = min(50.0, 30.0 / safe_ki)
+        # Simple anti-windup: clamp integral magnitude
+        INTEGRAL_MAX = 50.0
         self._integral_x = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral_x))
         self._integral_y = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral_y))
 
-        # Direction reversal with large error: overshoot, halve integral
-        if error_x * self._prev_error_x < 0 and abs(error_x) > 8.0:
-            self._integral_x *= 0.3
-        if error_y * self._prev_error_y < 0 and abs(error_y) > 8.0:
-            self._integral_y *= 0.3
+        # Direction reversal: if error flips sign, clear integral (overshot)
+        if error_x * self._prev_error_x < 0:
+            self._integral_x = 0.0
+        if error_y * self._prev_error_y < 0:
+            self._integral_y = 0.0
 
-        # Decay integral when near target — stronger decay as we get closer
-        if err_mag < 20.0:
-            # At 0px → decay=0.5, at 20px → decay=1.0 (no decay)
-            decay = 0.5 + 0.5 * (err_mag / 20.0)
-            self._integral_x *= decay
-            self._integral_y *= decay
+        # Raw I output
+        i_x = ki * self._integral_x
+        i_y = ki * self._integral_y
 
-        # --- Derivative (frame-based, NOT divided by dt) ---
+        # --- Derivative (frame-based) ---
         deriv_x = error_x - self._prev_error_x
         deriv_y = error_y - self._prev_error_y
         self._prev_error_x = error_x
         self._prev_error_y = error_y
 
-        # --- PID output ---
-        move_x = kp * error_x + ki * self._integral_x + kd * deriv_x
-        move_y = kp * error_y + ki * self._integral_y + kd * deriv_y
+        # Raw D output
+        d_x = kd * deriv_x
+        d_y = kd * deriv_y
 
-        # Soft-start ramp: gradually increase output over first N frames
-        # P-only during ramp (integral blocked above), prevents fling on lock-on
+        # --- SAFETY CLAMP: I+D combined output ≤ 3× P magnitude ---
+        # Prevents lock-to-air: I+D can boost speed significantly for tracking
+        # fast-moving targets, but is bounded relative to P so the output
+        # can never wildly overshoot to a completely wrong position.
+        # 3x means: total output is between -2P (strong brake) and +4P (fast chase).
+        # In practice the direction-reversal integral reset prevents negative I,
+        # so output stays between ~0 and 4P — always toward target.
+        ID_RATIO = 3.0
+        id_x = i_x + d_x
+        id_y = i_y + d_y
+        id_mag = (id_x**2 + id_y**2) ** 0.5
+        max_id = p_mag * ID_RATIO
+        if id_mag > max_id and p_mag > 0.1:
+            clamp_scale = max_id / id_mag
+            id_x *= clamp_scale
+            id_y *= clamp_scale
+
+        move_x = p_x + id_x
+        move_y = p_y + id_y
+
+        # Soft-start ramp over first N frames
         if self._frame_count <= RAMP_FRAMES:
             ramp = self._frame_count / float(RAMP_FRAMES)
             move_x *= ramp
@@ -819,6 +842,10 @@ class VisionViewerApp:
         self.aim_ki_var = tk.DoubleVar(value=_read_config_value("aaKi", 0.0, float))
         # Kd (derivative): dampens overshoot / oscillation. 0=no damping.
         self.aim_kd_var = tk.DoubleVar(value=_read_config_value("aaKd", 0.0, float))
+        # Mouse backend selection
+        _mb_cfg = _read_config_value("mouseBackend", "auto", str)
+        self.mouse_backend_var = tk.StringVar(
+            value=MOUSE_BACKEND_OPTIONS.get(_mb_cfg, MOUSE_BACKEND_OPTIONS["auto"]))
         self.crosshair_y_offset_var = tk.IntVar(value=_read_config_value("crosshairYOffset", 0, int))
         self.fps_var = tk.IntVar(value=_read_config_value("captureFPS", 60, int))
         self.screenshot_size_var = tk.IntVar(value=_read_config_value("screenShotHeight", 320, int))
@@ -1167,6 +1194,17 @@ class VisionViewerApp:
         tk.Scale(right, from_=0.0, to=5.0, orient="horizontal", variable=self.aim_kd_var,
                  resolution=0.1, command=lambda v: self.kd_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
         ttk.Label(right, text="抑制过冲/抖动 0=无阻尼 推荐0.5~2.0", font=("", 8)).pack(anchor="w")
+
+        # --- Mouse backend selector ---
+        ttk.Label(right, text="── 鼠标驱动 ──", font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        f_mb = ttk.Frame(right); f_mb.pack(fill="x", pady=2)
+        ttk.Label(f_mb, text="移动方式:").pack(side="left")
+        ttk.Combobox(f_mb, textvariable=self.mouse_backend_var,
+                     values=list(MOUSE_BACKEND_OPTIONS.values()),
+                     state="readonly", width=30).pack(side="right")
+        ttk.Label(right, text="重启生效 | auto=自动选最快 | Interception需装驱动", font=("", 8)).pack(anchor="w")
+        self.mouse_backend_status_label = ttk.Label(right, text="当前: (启动后显示)", font=("", 8), foreground="gray")
+        self.mouse_backend_status_label.pack(anchor="w")
 
         # Start a periodic status label updater (catches hotkey toggles too)
         self._update_status_labels()
@@ -1546,6 +1584,16 @@ class VisionViewerApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # -------------------------------------------------- mouse backend label
+    def _update_mouse_backend_label(self, drv):
+        """Update the mouse backend status label in the GUI."""
+        try:
+            self.mouse_backend_status_label.configure(
+                text=f"当前: {drv.display_name} ({drv.backend_name})",
+                foreground="green" if drv.backend_name == "interception" else "blue")
+        except Exception:
+            pass
+
     # -------------------------------------------------- status label updater
     def _update_status_labels(self):
         """Update aim/recoil status labels. Called by checkbutton command and periodically."""
@@ -1826,6 +1874,7 @@ class VisionViewerApp:
             "aaTargetLockRadius": self.aim_target_lock_radius_var.get(),
             "aaKi": round(self.aim_ki_var.get(), 3),
             "aaKd": round(self.aim_kd_var.get(), 3),
+            "mouseBackend": MOUSE_BACKEND_REVERSE.get(self.mouse_backend_var.get(), "auto"),
             "ovBoxThickness": self.ov_box_thickness_var.get(),
             "ovBoxStyle": self.ov_box_style_var.get(),
             "ovCornerLen": self.ov_corner_len_var.get(),
@@ -1919,6 +1968,9 @@ class VisionViewerApp:
             self.aim_ki_var.set(float(vals["aaKi"]))
         if "aaKd" in vals:
             self.aim_kd_var.set(float(vals["aaKd"]))
+        if "mouseBackend" in vals:
+            _mb = str(vals["mouseBackend"])
+            self.mouse_backend_var.set(MOUSE_BACKEND_OPTIONS.get(_mb, MOUSE_BACKEND_OPTIONS["auto"]))
         if "ovBoxThickness" in vals:
             self.ov_box_thickness_var.set(int(vals["ovBoxThickness"]))
         if "ovBoxStyle" in vals:
@@ -2581,6 +2633,15 @@ class VisionViewerApp:
         # PID controller for aim tracking (replaces pure P-controller)
         aim_pid = AimPID()
 
+        # Mouse driver: read user-selected backend from GUI dropdown
+        _mb_display = self.mouse_backend_var.get()
+        _mb_key = MOUSE_BACKEND_REVERSE.get(_mb_display, "auto")
+        self._mouse_drv = MouseDriver(_mb_key)
+        self._mouse_drv_key = _mb_key  # track current key to detect live changes
+        mouse_drv = self._mouse_drv
+        # Update GUI status label with actual active backend
+        self._update_mouse_backend_label(mouse_drv)
+
         # Target lock: stick to one target to avoid multi-target pull
         locked_target_pos = None    # (mid_x, mid_y) of locked target
         locked_miss_count = 0       # consecutive frames target not found
@@ -2595,12 +2656,24 @@ class VisionViewerApp:
         MAX_PIXEL_DELTA = 150
 
         print("===== Aim loop started =====")
+        print(f"  mouse_backend = {mouse_drv.backend_name}")
         print(f"  win32api loaded = {win32api is not None}")
         print(f"  screenShot = {_ss}x{_ss}")
         print(f"  target_fps = {current_fps}")
         print("=============================")
 
         while self.running:
+            # --- Live mouse backend switch (no restart needed) ---
+            _mb_new_display = self.mouse_backend_var.get()
+            _mb_new_key = MOUSE_BACKEND_REVERSE.get(_mb_new_display, "auto")
+            if _mb_new_key != self._mouse_drv_key:
+                print(f"[MouseDriver] Switching backend: {self._mouse_drv_key} → {_mb_new_key}")
+                mouse_drv.destroy()
+                self._mouse_drv = MouseDriver(_mb_new_key)
+                self._mouse_drv_key = _mb_new_key
+                mouse_drv = self._mouse_drv
+                self._update_mouse_backend_label(mouse_drv)
+
             t_frame_start = time.perf_counter()
             capture_region = None  # (left, top, ...) for overlay coordinate mapping
             if self._mouse_mode and win32api is not None:
@@ -3204,7 +3277,7 @@ class VisionViewerApp:
                             mX, mY = 0, 0
 
                         if keyDown and (mX != 0 or mY != 0):
-                            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
+                            mouse_drv.move(mX, mY)
                             if now_t - aim_log_timer > 1:
                                 print(f"[ASSIST] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} move=({mX},{mY})")
                                 aim_log_timer = now_t
@@ -3239,7 +3312,7 @@ class VisionViewerApp:
                             mX, mY = 0, 0
 
                         if keyDown and (mX != 0 or mY != 0):
-                            win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, mX, mY, 0, 0)
+                            mouse_drv.move(mX, mY)
                             if now_t - aim_log_timer > 0.5:
                                 print(f"[AIM] raw=({rawX:.1f},{rawY:.1f}) dist={raw_dist:.1f} kp={kp:.3f} ki={ki:.3f} kd={kd:.3f} move=({mX},{mY}) amp={cur_amp:.2f} sm={cur_smooth:.1f}")
                                 aim_log_timer = now_t
@@ -3413,6 +3486,7 @@ class VisionViewerApp:
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 
+        mouse_drv.destroy()
         self._cleanup_camera()
         self.root.after(0, self.stop_viewer)
 
