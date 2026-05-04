@@ -960,6 +960,8 @@ class VisionViewerApp:
         self.antiflash_enabled_var = tk.BooleanVar(value=False)
         self.antiflash_delay_var = tk.DoubleVar(value=_read_config_value("antiflashDelay", 0.5, float))  # seconds
         self.antiflash_conf_var = tk.DoubleVar(value=_read_config_value("antiflashConf", 0.5, float))  # min confidence
+        self.antiflash_block_input_var = tk.BooleanVar(value=_read_config_value("antiflashBlockInput", True, bool))
+        self.antiflash_fov_var = tk.IntVar(value=_read_config_value("antiflashFOV", 0, int))  # 0 = no limit
         self._antiflash_active = False       # True while turned away
         self._antiflash_cooldown_until = 0.0 # timestamp: ignore new flashes until this time
 
@@ -1536,6 +1538,17 @@ class VisionViewerApp:
         tk.Scale(right, from_=0.1, to=1.0, orient="horizontal", variable=self.antiflash_conf_var,
                  resolution=0.05, command=lambda v: self.antiflash_conf_label.configure(text=f"{float(v):.2f}")).pack(fill="x")
         ttk.Label(right, text="需要模型类别含\"闪\"字, 使用CS2灵敏度计算转身", font=("", 8)).pack(anchor="w")
+        ttk.Checkbutton(right, text="漂移补偿 (自动修正手抖导致的回转偏差)", variable=self.antiflash_block_input_var).pack(anchor="w", pady=2)
+        ttk.Label(right, text="记录背闪期间鼠标漂移量, 回转时自动补偿", font=("", 8)).pack(anchor="w")
+
+        # Anti-flash FOV
+        f_af3 = ttk.Frame(right); f_af3.pack(fill="x", pady=2)
+        ttk.Label(f_af3, text="背闪FOV (0=无限制):").pack(side="left")
+        self.antiflash_fov_label = ttk.Label(f_af3, text=str(self.antiflash_fov_var.get()))
+        self.antiflash_fov_label.pack(side="right")
+        tk.Scale(right, from_=0, to=500, orient="horizontal", variable=self.antiflash_fov_var,
+                 command=lambda v: self.antiflash_fov_label.configure(text=str(int(float(v))))).pack(fill="x")
+        ttk.Label(right, text="只对屏幕中心指定范围内的闪光弹触发背闪, 0=全屏检测", font=("", 8)).pack(anchor="w")
 
         # ===== Switch to DETECT tab (color section) =====
         right = tab_detect
@@ -1754,14 +1767,28 @@ class VisionViewerApp:
         inp.mi.dwExtraInfo = None
         ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
+    @staticmethod
+    def _get_cursor_pos():
+        """Get current cursor position via GetCursorPos."""
+        pt = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+
     def _antiflash_execute(self, delay_sec):
-        """Anti-flash thread: turn 180°, wait, turn back. Runs in background thread."""
+        """Anti-flash thread: turn 180°, wait, turn back. Runs in background thread.
+        When drift compensation is enabled, records cursor position before/after the
+        wait period and subtracts user-induced drift from the turn-back move.
+        """
+        compensate = self.antiflash_block_input_var.get()
         try:
             self._antiflash_active = True
             sens = self.cs2_sensitivity_var.get()
             # CS2: mouse_counts = degrees / (sensitivity * 0.022)
             turn_counts = int(180.0 / (sens * 0.022))
-            print(f"[ANTI-FLASH] Triggered! sens={sens:.2f} turn={turn_counts}px delay={delay_sec:.1f}s")
+            print(f"[ANTI-FLASH] Triggered! sens={sens:.2f} turn={turn_counts}px delay={delay_sec:.1f}s compensate={compensate}")
+
+            # Record cursor before turn-away
+            pre_x, pre_y = self._get_cursor_pos()
 
             # Split the large move into chunks to avoid driver limits on single mouse_event
             chunk = 500  # max pixels per single move call
@@ -1773,19 +1800,37 @@ class VisionViewerApp:
                 if remaining > 0:
                     time.sleep(0.001)
 
+            # Record cursor after turn-away completes
+            after_turn_x, after_turn_y = self._get_cursor_pos()
+
             # Wait while turned away
             time.sleep(delay_sec)
 
-            # Turn back (negative direction, same magnitude)
-            remaining = turn_counts
+            # Record cursor after wait — any delta is user hand jitter
+            after_wait_x, after_wait_y = self._get_cursor_pos()
+            drift_x = after_wait_x - after_turn_x
+            drift_y = after_wait_y - after_turn_y
+
+            # Turn back: base turn + compensate for user drift during wait
+            back_counts = turn_counts
+            if compensate and (drift_x != 0 or drift_y != 0):
+                back_counts += drift_x  # add horizontal drift to turn-back
+                print(f"[ANTI-FLASH] Drift compensation: dx={drift_x} dy={drift_y} back={back_counts}px")
+
+            remaining = abs(back_counts)
+            sign = -1 if back_counts > 0 else 1  # turn back is opposite direction
             while remaining > 0:
                 move = min(remaining, chunk)
-                self._send_input_move(-move, 0)
+                self._send_input_move(sign * move, 0)
                 remaining -= move
                 if remaining > 0:
                     time.sleep(0.001)
 
-            print(f"[ANTI-FLASH] Returned to original angle")
+            # Also compensate vertical drift
+            if compensate and drift_y != 0:
+                self._send_input_move(0, -drift_y)
+
+            print(f"[ANTI-FLASH] Returned to original angle (drift_x={drift_x} drift_y={drift_y})")
         except Exception as e:
             print(f"[ANTI-FLASH] Error: {e}")
         finally:
@@ -1979,6 +2024,8 @@ class VisionViewerApp:
             "antiflashEnabled": self.antiflash_enabled_var.get(),
             "antiflashDelay": round(self.antiflash_delay_var.get(), 1),
             "antiflashConf": round(self.antiflash_conf_var.get(), 2),
+            "antiflashBlockInput": self.antiflash_block_input_var.get(),
+            "antiflashFOV": self.antiflash_fov_var.get(),
             # Color detection mode
             "colorModeEnabled": self.color_mode_var.get(),
             "colorPreset": self.color_preset_var.get(),
@@ -2123,6 +2170,10 @@ class VisionViewerApp:
             self.antiflash_delay_var.set(float(vals["antiflashDelay"]))
         if "antiflashConf" in vals:
             self.antiflash_conf_var.set(float(vals["antiflashConf"]))
+        if "antiflashBlockInput" in vals:
+            self.antiflash_block_input_var.set(bool(vals["antiflashBlockInput"]))
+        if "antiflashFOV" in vals:
+            self.antiflash_fov_var.set(int(vals["antiflashFOV"]))
         # Color detection mode
         if "colorModeEnabled" in vals:
             self.color_mode_var.set(bool(vals["colorModeEnabled"]))
@@ -3055,10 +3106,13 @@ class VisionViewerApp:
                         and time.perf_counter() > self._antiflash_cooldown_until
                         and self._model_class_names):
                     af_conf = self.antiflash_conf_var.get()
+                    af_fov = self.antiflash_fov_var.get()
                     flash_cls_ids = {cid for cid, name in self._model_class_names.items() if "闪" in name}
                     if flash_cls_ids:
                         for d in all_dets:
                             if d["cls"] in flash_cls_ids and d["conf"] >= af_conf:
+                                if af_fov > 0 and d["dist"] > af_fov:
+                                    continue  # outside anti-flash FOV, ignore
                                 af_delay = self.antiflash_delay_var.get()
                                 threading.Thread(target=self._antiflash_execute,
                                                  args=(af_delay,), daemon=True).start()
