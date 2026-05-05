@@ -809,13 +809,16 @@ class VisionViewerApp:
         self.running = False
         self.worker = None
         # ZTXAI-style decoupled pipeline:
-        #   capture thread  -> _frame_queue -> inference thread (viewer_loop)
+        #   capture thread  -> _frame_queue   -> inference thread (viewer_loop)
         #   inference thread -> _display_queue -> display thread (cv2.imshow + waitKey)
+        #   inference thread -> _overlay_queue -> overlay thread (UpdateLayeredWindow)
         # All queues are 1-slot with overwrite policy so consumers always get the latest.
         self._frame_queue = queue.Queue(maxsize=1)
         self._display_queue = queue.Queue(maxsize=1)
+        self._overlay_queue = queue.Queue(maxsize=1)
         self._capture_thread = None
         self._display_thread = None
+        self._overlay_thread = None
         self.device_name = "Not initialized"
 
         self.status_var = tk.StringVar(value="Ready")
@@ -2853,23 +2856,74 @@ class VisionViewerApp:
             pass
         print("[DISPLAY] display thread exiting")
 
+    def _overlay_loop(self):
+        """Tier 10: dedicated overlay thread.
+        Owns the OverlayWindow (created lazily on first draw payload).
+        Inference thread only pushes lightweight payloads, so the per-frame
+        overlay cost (~0.7-1ms numpy fill + UpdateLayeredWindow) is paid in
+        parallel and no longer counts toward iter_ms.
+
+        Payload schema:
+          - dict {"action":"draw", "dets":[...], "region":(...), "style":{...}, "fov":float}
+          - dict {"action":"clear"}
+          - None  → exit
+        """
+        print("[OVERLAY-T] overlay thread started")
+        ow = None
+        while self.running:
+            try:
+                p = self._overlay_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if p is None:
+                break
+            try:
+                action = p.get("action")
+                if action == "draw":
+                    if ow is None:
+                        try:
+                            ow = OverlayWindow()
+                            self._overlay = ow
+                            print("[OVERLAY-T] OverlayWindow created on overlay thread")
+                        except Exception as oe:
+                            print(f"[OVERLAY-T] failed to create OverlayWindow: {oe}")
+                            ow = None
+                            self._overlay = None
+                            continue
+                    ow.draw(p["dets"], p.get("region"), **p.get("style", {}),
+                            fov_radius=p.get("fov", 0))
+                elif action == "clear":
+                    if ow is not None:
+                        try:
+                            ow.clear()
+                        except Exception as ce:
+                            print(f"[OVERLAY-T] clear error: {ce}")
+            except Exception as e:
+                print(f"[OVERLAY-T] error: {e}")
+        # Exit: destroy the overlay window we own
+        if ow is not None:
+            try:
+                ow.destroy()
+            except Exception:
+                pass
+            self._overlay = None
+        print("[OVERLAY-T] overlay thread exiting")
+
     def _start_capture_thread(self):
-        """Start (or restart) the dedicated capture + display threads."""
+        """Start (or restart) the dedicated capture + display + overlay threads."""
         # Drain any stale frames from previous session
-        try:
-            while not self._frame_queue.empty():
-                self._frame_queue.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            while not self._display_queue.empty():
-                self._display_queue.get_nowait()
-        except queue.Empty:
-            pass
+        for _q in (self._frame_queue, self._display_queue, self._overlay_queue):
+            try:
+                while not _q.empty():
+                    _q.get_nowait()
+            except queue.Empty:
+                pass
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
         self._display_thread = threading.Thread(target=self._display_loop, daemon=True)
         self._display_thread.start()
+        self._overlay_thread = threading.Thread(target=self._overlay_loop, daemon=True)
+        self._overlay_thread.start()
 
     # -------------------------------------------------------- main loop
     def viewer_loop(self):
@@ -3022,18 +3076,20 @@ class VisionViewerApp:
                     _cs = self.color_smooth_var.get()
                     cur_smooth = max(1.0 / max(_cs, 0.05), 1.0)
                     cur_amp = 1.0  # color mode doesn't need amp scaling
-            # Manage overlay lifecycle
-            if use_overlay and self._overlay is None:
+            # Tier 10: overlay lifecycle is now owned by _overlay_loop.
+            # We only track toggles here so we can push a one-shot "clear" payload
+            # when the user disables the overlay (so the last frame's boxes vanish).
+            if not use_overlay and getattr(self, "_prev_use_overlay", False):
                 try:
-                    self._overlay = OverlayWindow()
-                    print("[OVERLAY] Created fullscreen overlay")
-                except Exception as oe:
-                    print(f"[OVERLAY] Failed to create: {oe}")
-                    self._overlay = None
-            elif not use_overlay and self._overlay is not None:
-                self._overlay.destroy()
-                self._overlay = None
-                print("[OVERLAY] Destroyed overlay")
+                    while not self._overlay_queue.empty():
+                        self._overlay_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._overlay_queue.put_nowait({"action": "clear"})
+                except queue.Full:
+                    pass
+            self._prev_use_overlay = use_overlay
             render_counter += 1
             do_render = (show_preview or use_overlay) and (render_counter % RENDER_EVERY_N == 0)
 
@@ -3872,8 +3928,8 @@ class VisionViewerApp:
                 except queue.Full:
                     pass
 
-            # --- Overlay drawing ---
-            if do_render and use_overlay and self._overlay is not None:
+            # --- Overlay drawing (Tier 10: dispatched to dedicated overlay thread) ---
+            if do_render and use_overlay:
                 # Compute FOV circle radius for overlay
                 _ov_fov_r = 0
                 if self.ov_fov_circle_var.get():
@@ -3888,19 +3944,32 @@ class VisionViewerApp:
                     elif cur_fov > 0:
                         _ov_fov_r = cur_fov
                 _t_ov_start = time.perf_counter()
-                self._overlay.draw(all_dets, capture_region,
-                                   box_thickness=self.ov_box_thickness_var.get(),
-                                   box_style=self.ov_box_style_var.get(),
-                                   corner_len=self.ov_corner_len_var.get(),
-                                   show_dot=self.ov_dot_var.get(),
-                                   dot_size=self.ov_dot_size_var.get(),
-                                   dot_style=self.ov_dot_style_var.get(),
-                                   dot_color=self.ov_dot_color_var.get(),
-                                   hide_label=self.ov_hide_label_var.get(),
-                                   fov_radius=_ov_fov_r)
+                _ov_payload = {
+                    "action": "draw",
+                    "dets": all_dets,
+                    "region": capture_region,
+                    "style": {
+                        "box_thickness": self.ov_box_thickness_var.get(),
+                        "box_style": self.ov_box_style_var.get(),
+                        "corner_len": self.ov_corner_len_var.get(),
+                        "show_dot": self.ov_dot_var.get(),
+                        "dot_size": self.ov_dot_size_var.get(),
+                        "dot_style": self.ov_dot_style_var.get(),
+                        "dot_color": self.ov_dot_color_var.get(),
+                        "hide_label": self.ov_hide_label_var.get(),
+                    },
+                    "fov": _ov_fov_r,
+                }
+                try:
+                    while not self._overlay_queue.empty():
+                        self._overlay_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._overlay_queue.put_nowait(_ov_payload)
+                except queue.Full:
+                    pass
                 perf_overlay_ms += (time.perf_counter() - _t_ov_start) * 1000
-            elif not use_overlay and self._overlay is not None:
-                pass  # overlay destroyed above already
 
             # ===== End-of-iteration timing =====
             # iter_ms = time from receiving frame to end of this loop iteration (true 1/FPS)
@@ -3920,8 +3989,20 @@ class VisionViewerApp:
         # Camera cleanup is handled by _cleanup_camera, called from the worker
         # thread after it exits the loop (see viewer_loop end).
         # We only do UI cleanup here to keep the main thread non-blocking.
-        if self._overlay is not None:
-            self._overlay.clear()
+        # Tier 10: overlay is owned by _overlay_loop; ask it to clear, then exit.
+        try:
+            while not self._overlay_queue.empty():
+                self._overlay_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._overlay_queue.put_nowait({"action": "clear"})
+        except queue.Full:
+            pass
+        try:
+            self._overlay_queue.put_nowait(None)  # signal overlay thread to exit
+        except queue.Full:
+            pass
         cv2.destroyAllWindows()
         self.status_var.set("已停止")
 
@@ -3947,9 +4028,16 @@ class VisionViewerApp:
         self._key_poll_running = False
         self._stop_rigid_recoil()
         self.running = False
+        # Tier 10: signal overlay thread to exit and let it destroy its own OverlayWindow
+        try:
+            self._overlay_queue.put_nowait(None)
+        except Exception:
+            pass
         # Wait briefly for worker thread to finish before destroying window
         if self.worker is not None and self.worker.is_alive():
             self.worker.join(timeout=2.0)
+        if self._overlay_thread is not None and self._overlay_thread.is_alive():
+            self._overlay_thread.join(timeout=1.0)
         # Now safe to release camera and destroy UI
         try:
             if self.camera is not None:
@@ -3962,8 +4050,12 @@ class VisionViewerApp:
                 self.camera = None
         except Exception:
             pass
+        # Fallback: if overlay thread didn't clean up in time, do it here
         if self._overlay is not None:
-            self._overlay.destroy()
+            try:
+                self._overlay.destroy()
+            except Exception:
+                pass
             self._overlay = None
         cv2.destroyAllWindows()
         self.root.destroy()
