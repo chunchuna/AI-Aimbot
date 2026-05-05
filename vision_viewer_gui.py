@@ -1002,6 +1002,7 @@ class VisionViewerApp:
         self._model_input_dtype = np.float16  # updated when model loads
         self._model_input_name = "images"     # updated when model loads
         self._model_output_format = "v5"      # "v5" or "v8" — updated when model loads
+        self._model_output_names = None       # cached output names list (avoids run(None,...) overhead)
         # Class filter: {cls_id: name} from model metadata, and BooleanVars per class
         self._model_class_names = {}          # {0: "CT", 1: "T", ...} from metadata
         self._class_filter_vars = {}          # {cls_id: tk.BooleanVar} — True = enabled
@@ -2453,6 +2454,7 @@ class VisionViewerApp:
                 self._model_input_dtype = model_dtype
                 self._model_input_name = inp.name
                 self._model_output_format = out_fmt
+                self._model_output_names = [o.name for o in new_model.get_outputs()]
                 self._model_skip_normalize = self._check_skip_normalize(path, out_fmt)
                 if out_fmt == "yolox":
                     yolox_strides = [8, 16, 32]
@@ -2553,8 +2555,21 @@ class VisionViewerApp:
         else:
             prov = "CPUExecutionProvider"; self.device_name = "CPU"
         self.device_var.set(f"Device: {self.device_name}")
+        # PERF: DML-tuned SessionOptions.
+        # - graph_optimization_level=BASIC: ORT_ENABLE_ALL aggressively fuses ops in ways
+        #   that DirectML often can't accelerate, causing more kernel launches per inference.
+        # - enable_cpu_mem_arena=False: DML manages its own GPU memory; the CPU arena is unused noise.
+        # - enable_mem_pattern=False: with dynamic input shapes (YOLOv11), the pattern allocator
+        #   keeps reallocating per-shape, which hurts steady-state perf.
+        # - execution_mode=SEQUENTIAL: parallel mode adds threading overhead with no win on a single-stream model.
         so = ort.SessionOptions()
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        if prov == "DmlExecutionProvider":
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+            so.enable_cpu_mem_arena = False
+            so.enable_mem_pattern = False
+            so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        else:
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         return ort.InferenceSession(model_path, sess_options=so, providers=[prov])
 
     def load_model(self):
@@ -2575,6 +2590,7 @@ class VisionViewerApp:
         self._model_input_size = (model_w, model_h)
         self._model_input_dtype = np.float16 if 'float16' in str(inp.type).lower() or 'half' in path.lower() else np.float32
         self._model_input_name = inp.name
+        self._model_output_names = [o.name for o in self.model.get_outputs()]
         # Read class names from model metadata and update filter UI
         cls_names = self._read_model_class_names(self.model)
         if cls_names:
@@ -2767,18 +2783,60 @@ class VisionViewerApp:
 
     def _display_loop(self):
         """ZTXAI-style: dedicated display thread.
-        cv2.imshow + waitKey can take 5-15ms on Windows due to GUI message pump,
-        so we move it off the inference hot path entirely."""
+        Does ALL cv2 drawing (rectangle / putText / circle / line / imshow / waitKey)
+        so the inference thread's post_ms stays independent of target count N.
+
+        Accepts two payload shapes from `_display_queue`:
+          - dict  {image, dets, crosshair, hud}     ← new Tier-8 format (preferred)
+          - ndarray                                   ← legacy (already-drawn image)
+        """
         print("[DISPLAY] display thread started")
         cv_window_created = False
+        FONT = cv2.FONT_HERSHEY_SIMPLEX
         while self.running:
             try:
-                display = self._display_queue.get(timeout=0.1)
+                payload = self._display_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if display is None:
+            if payload is None:
                 continue
             try:
+                if isinstance(payload, dict):
+                    img = payload.get("image")
+                    if img is None:
+                        continue
+                    # Copy before drawing so we don't mutate the raw capture buffer.
+                    display = img.copy()
+                    # --- Detection boxes + labels + aim dots ---
+                    for d in payload.get("dets", ()):  # noqa: PLR0912
+                        color = d.get("_color")
+                        if color is None:
+                            continue
+                        xyxy = d.get("xyxy")
+                        if xyxy is None:
+                            continue
+                        x1, y1, x2, y2 = xyxy
+                        cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+                        label = d.get("_label")
+                        if label:
+                            cv2.putText(display, label, (x1, max(20, y1 - 8)),
+                                        FONT, 0.5, color, 2)
+                        ax = d.get("_aim_x")
+                        ay = d.get("_aim_y")
+                        if ax is not None and ay is not None:
+                            cv2.circle(display, (int(ax), int(ay)), 5, (0, 0, 255), -1)
+                    # --- Crosshair ---
+                    ch = payload.get("crosshair")
+                    if ch is not None:
+                        cx, cy = int(ch[0]), int(ch[1])
+                        cv2.line(display, (cx - 10, cy), (cx + 10, cy), (0, 0, 255), 1)
+                        cv2.line(display, (cx, cy - 10), (cx, cy + 10), (0, 0, 255), 1)
+                    # --- HUD ---
+                    for hud_item in payload.get("hud", ()):
+                        txt, org, scale, col, thk = hud_item
+                        cv2.putText(display, txt, org, FONT, scale, col, thk)
+                else:
+                    display = payload  # legacy path: already a drawn ndarray
                 cv2.imshow("AI Vision Viewer", display)
                 if not cv_window_created:
                     cv2.setWindowProperty("AI Vision Viewer", cv2.WND_PROP_TOPMOST, 1)
@@ -3001,7 +3059,9 @@ class VisionViewerApp:
                 # Build targets from contours (same dict format as AI detection)
                 targets = []
                 head_boxes = []
-                display = image.copy() if do_render else None
+                # PERF: drawing is now done in _display_loop (off the hot path).
+                # Keep display=None so the legacy `if display is not None:` branches are no-ops.
+                display = None
                 all_dets = []
                 is_headbody_model = False  # color mode has no head/body distinction
 
@@ -3077,14 +3137,22 @@ class VisionViewerApp:
 
                 t_infer_start = time.perf_counter()
                 try:
+                    # PERF: snapshot model state under lock then release BEFORE session.run().
+                    # session.run() is thread-safe; holding the lock for the whole 4ms blocks
+                    # the capture/display threads on every frame and starves them of GIL.
                     with self._model_lock:
                         input_name = self._model_input_name
                         out_fmt = self._model_output_format
-                        outputs = self.model.run(None, {input_name: im})
+                        output_names = self._model_output_names
+                        sess = self.model
+                    # PERF: pass explicit output_names (skips ORT's internal lookup of "all outputs")
+                    outputs = sess.run(output_names, {input_name: im})
                     raw = outputs[0]
 
+                    # PERF (Tier 9): NMS via cv2.dnn.NMSBoxes (pure C++) instead of torch
+                    # tensor + Python while loop; infer bucket no longer scales with target count.
                     if out_fmt == "yolox":
-                        # YOLOX: [1, N_anchors, 5+nc] — bbox is raw (needs grid decode), obj+cls are sigmoid
+                        # YOLOX: [1, N_anchors, 5+nc] — bbox needs grid decode; obj+cls are sigmoid
                         with self._model_lock:
                             gx = self._yolox_grid_x
                             gy = self._yolox_grid_y
@@ -3109,23 +3177,19 @@ class VisionViewerApp:
                         if mask.any():
                             cx_f, cy_f = dec_cx[mask], dec_cy[mask]
                             w_f, h_f = dec_w[mask], dec_h[mask]
-                            x1 = cx_f - w_f / 2
-                            y1 = cy_f - h_f / 2
-                            x2 = cx_f + w_f / 2
-                            y2 = cy_f + h_f / 2
-                            confs_f = confs[mask]
+                            confs_f = confs[mask].astype(np.float32)
                             class_ids_f = class_ids[mask].astype(np.float32)
-                            dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f], axis=1))
-                            order = torch.argsort(dets[:, 4], descending=True)
-                            dets = dets[order[:50]]
-                            keep = []
-                            while len(dets) > 0 and len(keep) < 10:
-                                keep.append(dets[0])
-                                if len(dets) == 1:
-                                    break
-                                ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
-                                dets = dets[1:][ious < 0.45]
-                            pred = [torch.stack(keep)] if keep else []
+                            x1 = (cx_f - w_f / 2).astype(np.float32)
+                            y1 = (cy_f - h_f / 2).astype(np.float32)
+                            x2 = (cx_f + w_f / 2).astype(np.float32)
+                            y2 = (cy_f + h_f / 2).astype(np.float32)
+                            xywh = np.stack([x1, y1, w_f.astype(np.float32), h_f.astype(np.float32)], axis=1)
+                            keep = cv2.dnn.NMSBoxes(xywh, confs_f, float(cur_conf), 0.45)
+                            if len(keep) > 0:
+                                keep = np.asarray(keep).reshape(-1)[:10]
+                                det = np.stack([x1[keep], y1[keep], x2[keep], y2[keep],
+                                                confs_f[keep], class_ids_f[keep]], axis=1)
+                                pred = [det]
 
                     elif out_fmt == "v8":
                         # YOLOv8 output: [1, 4+nc, anchors] → transpose to [1, anchors, 4+nc]
@@ -3140,31 +3204,58 @@ class VisionViewerApp:
                             confs = boxes[:, 4]
                             class_ids = np.zeros(len(confs), dtype=int)
                         mask = confs > cur_conf
-                        boxes_f = boxes[mask]
-                        confs_f = confs[mask]
-                        class_ids_f = class_ids[mask]
                         pred = []
-                        if len(boxes_f) > 0:
-                            cx, cy, w, h = boxes_f[:, 0], boxes_f[:, 1], boxes_f[:, 2], boxes_f[:, 3]
+                        if mask.any():
+                            boxes_f = boxes[mask]
+                            confs_f = confs[mask].astype(np.float32)
+                            class_ids_f = class_ids[mask].astype(np.float32)
+                            cx = boxes_f[:, 0].astype(np.float32)
+                            cy = boxes_f[:, 1].astype(np.float32)
+                            w = boxes_f[:, 2].astype(np.float32)
+                            h = boxes_f[:, 3].astype(np.float32)
                             x1 = cx - w / 2
                             y1 = cy - h / 2
                             x2 = cx + w / 2
                             y2 = cy + h / 2
-                            dets = torch.tensor(np.stack([x1, y1, x2, y2, confs_f, class_ids_f.astype(np.float32)], axis=1))
-                            order = torch.argsort(dets[:, 4], descending=True)
-                            dets = dets[order[:50]]
-                            keep = []
-                            while len(dets) > 0 and len(keep) < 10:
-                                keep.append(dets[0])
-                                if len(dets) == 1:
-                                    break
-                                ious = _box_iou(dets[0, :4].unsqueeze(0), dets[1:, :4]).squeeze(0)
-                                dets = dets[1:][ious < 0.45]
-                            pred = [torch.stack(keep)] if keep else []
+                            xywh = np.stack([x1, y1, w, h], axis=1)
+                            keep = cv2.dnn.NMSBoxes(xywh, confs_f, float(cur_conf), 0.45)
+                            if len(keep) > 0:
+                                keep = np.asarray(keep).reshape(-1)[:10]
+                                det = np.stack([x1[keep], y1[keep], x2[keep], y2[keep],
+                                                confs_f[keep], class_ids_f[keep]], axis=1)
+                                pred = [det]
                     else:
-                        # YOLOv5 output: [1, N, 85]
-                        pred = torch.from_numpy(raw).to('cpu')
-                        pred = non_max_suppression(pred, cur_conf, cur_conf, 0, False, max_det=10)
+                        # YOLOv5 output: [1, N, 85] — obj * class_conf then cv2 NMS
+                        raw0 = raw[0] if raw.ndim == 3 else raw  # [N, 5+nc]
+                        obj = raw0[:, 4]
+                        cls_confs = raw0[:, 5:]
+                        if cls_confs.shape[1] > 1:
+                            class_ids = np.argmax(cls_confs, axis=1)
+                            confs = obj * cls_confs[np.arange(len(raw0)), class_ids]
+                        else:
+                            class_ids = np.zeros(len(raw0), dtype=int)
+                            confs = obj * cls_confs[:, 0]
+                        mask = confs > cur_conf
+                        pred = []
+                        if mask.any():
+                            boxes_f = raw0[mask]
+                            confs_f = confs[mask].astype(np.float32)
+                            class_ids_f = class_ids[mask].astype(np.float32)
+                            cx = boxes_f[:, 0].astype(np.float32)
+                            cy = boxes_f[:, 1].astype(np.float32)
+                            w = boxes_f[:, 2].astype(np.float32)
+                            h = boxes_f[:, 3].astype(np.float32)
+                            x1 = cx - w / 2
+                            y1 = cy - h / 2
+                            x2 = cx + w / 2
+                            y2 = cy + h / 2
+                            xywh = np.stack([x1, y1, w, h], axis=1)
+                            keep = cv2.dnn.NMSBoxes(xywh, confs_f, float(cur_conf), 0.45)
+                            if len(keep) > 0:
+                                keep = np.asarray(keep).reshape(-1)[:10]
+                                det = np.stack([x1[keep], y1[keep], x2[keep], y2[keep],
+                                                confs_f[keep], class_ids_f[keep]], axis=1)
+                                pred = [det]
                 except Exception as exc:
                     print(f"[ERROR] Inference failed: {exc}")
                     self.root.after(0, self.status_var.set, f"检测错误: {exc}")
@@ -3180,7 +3271,9 @@ class VisionViewerApp:
                 # --- Build targets ---
                 targets = []
                 head_boxes = []
-                display = image.copy() if do_render else None
+                # PERF: drawing is now done in _display_loop (off the hot path).
+                # Keep display=None so the legacy `if display is not None:` branches are no-ops.
+                display = None
                 model_name = self.model_var.get()
                 is_headbody_model = "头身" in model_name or "头" in model_name
                 head_cls_ids = set()
@@ -3751,22 +3844,31 @@ class VisionViewerApp:
                 mode_tag = "找色" if use_color_mode else "AI"
                 self.root.after(0, self.status_var.set, f"运行中 [{mode_tag}] | FPS: {fps:.1f} | 目标: {len(targets)}")
 
-            if do_render and display is not None and show_preview:
-                cv2.putText(display, f"{self.device_name} | FPS:{last_actual_fps if last_actual_fps else int(fps)} | total:{last_avg_total_ms:.1f}ms", (8, 18),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(display, f"age:{last_avg_age_ms:.1f}ms infer:{last_avg_infer_ms:.1f}ms iter:{last_avg_iter_ms:.1f}ms post:{last_avg_post_ms:.1f}ms", (8, 56),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
-                aim_status = "ON" if aim_on else "OFF"
-                cv2.putText(display, f"Aim:{aim_status} Key:{self.key_var.get()} Target:{cur_target}",
-                            (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
-                # PERF: push to display thread (overwrite stale frame); cv2.imshow + waitKey runs off the hot path
+            if do_render and show_preview:
+                # PERF (Tier 8): push raw image + tagged detections to the display thread;
+                # drawing (rectangle/putText/circle/line) now happens OFF the inference hot path.
+                # This makes per-frame post_ms independent of target count N.
+                _hud = [
+                    (f"{self.device_name} | FPS:{last_actual_fps if last_actual_fps else int(fps)} | total:{last_avg_total_ms:.1f}ms",
+                     (8, 18), 0.5, (255, 255, 255), 1),
+                    (f"Aim:{'ON' if aim_on else 'OFF'} Key:{self.key_var.get()} Target:{cur_target}",
+                     (8, 38), 0.4, (0, 200, 255), 1),
+                    (f"age:{last_avg_age_ms:.1f}ms infer:{last_avg_infer_ms:.1f}ms iter:{last_avg_iter_ms:.1f}ms post:{last_avg_post_ms:.1f}ms",
+                     (8, 56), 0.4, (200, 255, 200), 1),
+                ]
+                _payload = {
+                    "image": image,
+                    "dets": all_dets,
+                    "crosshair": (cWidth, cHeight + cur_y_offset),
+                    "hud": _hud,
+                }
                 try:
                     while not self._display_queue.empty():
                         self._display_queue.get_nowait()
                 except queue.Empty:
                     pass
                 try:
-                    self._display_queue.put_nowait(display)
+                    self._display_queue.put_nowait(_payload)
                 except queue.Full:
                     pass
 
