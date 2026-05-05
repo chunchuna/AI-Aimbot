@@ -1,6 +1,6 @@
 # Portion of screen to be captured (This forms a square/rectangle around the center of screen)
-screenShotHeight = 416
-screenShotWidth = 416
+screenShotHeight = 256
+screenShotWidth = 256
 
 # Use "left" or "right" for the mask side depending on where the interfering object is, useful for 3rd player models or large guns
 useMask = False
@@ -203,7 +203,7 @@ selectedModel = "models\v11s256.onnx"
 # 1 - CPU
 # 2 - AMD
 # 3 - NVIDIA
-onnxChoice = 1
+onnxChoice = 3
 
 # ============ Dead Zone ============
 # Minimum pixel distance before mouse moves. Prevents jitter when on target.

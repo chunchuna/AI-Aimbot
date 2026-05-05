@@ -2,6 +2,7 @@ import json
 import os
 import random
 import re
+import queue
 import threading
 import time
 import tkinter as tk
@@ -807,6 +808,14 @@ class VisionViewerApp:
         self.model = None
         self.running = False
         self.worker = None
+        # ZTXAI-style decoupled pipeline:
+        #   capture thread  -> _frame_queue -> inference thread (viewer_loop)
+        #   inference thread -> _display_queue -> display thread (cv2.imshow + waitKey)
+        # All queues are 1-slot with overwrite policy so consumers always get the latest.
+        self._frame_queue = queue.Queue(maxsize=1)
+        self._display_queue = queue.Queue(maxsize=1)
+        self._capture_thread = None
+        self._display_thread = None
         self.device_name = "Not initialized"
 
         self.status_var = tk.StringVar(value="Ready")
@@ -2635,15 +2644,20 @@ class VisionViewerApp:
         try:
             if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
-            self.camera = bettercam.create(region=region, output_color="BGRA")
+            # PERF: BGR (3ch, no alpha) + small buffer; start(video_mode=True) runs capture in bg thread
+            self.camera = bettercam.create(region=region, output_color="BGR", max_buffer_len=2)
             if self.camera is None:
                 raise RuntimeError("摄像头创建失败")
+            # PERF: target_fps=0 = uncapped (capture at native refresh rate)
+            self.camera.start(target_fps=0, video_mode=True)
+            print("[CAPTURE] video_mode=True target_fps=0 (uncapped, capture at native refresh)")
         except Exception as exc:
             self.status_var.set("启动失败")
             messagebox.showerror("启动失败", str(exc))
             return
         self.running = True
         self.status_var.set("运行中 (窗口模式) | 按 Q 关闭预览窗口")
+        self._start_capture_thread()
         self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
         self.worker.start()
 
@@ -2669,15 +2683,20 @@ class VisionViewerApp:
         try:
             if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
-            self.camera = bettercam.create(region=region, output_color="BGRA")
+            # PERF: BGR (3ch, no alpha) + small buffer; start(video_mode=True) runs capture in bg thread
+            self.camera = bettercam.create(region=region, output_color="BGR", max_buffer_len=2)
             if self.camera is None:
                 raise RuntimeError("摄像头创建失败")
+            # PERF: target_fps=0 = uncapped (capture at native refresh rate)
+            self.camera.start(target_fps=0, video_mode=True)
+            print("[CAPTURE] video_mode=True target_fps=0 (uncapped, capture at native refresh)")
         except Exception as exc:
             self.status_var.set("启动失败")
             messagebox.showerror("启动失败", str(exc))
             return
         self.running = True
         self.status_var.set("运行中 (全屏模式) | 按 Q 关闭预览窗口")
+        self._start_capture_thread()
         self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
         self.worker.start()
 
@@ -2692,8 +2711,9 @@ class VisionViewerApp:
         try:
             if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
-            # Create camera without fixed region — we pass region per-frame in grab()
-            self.camera = bettercam.create(output_color="BGRA")
+            # Mouse-follow mode: region changes per frame, must keep grab(region=...) (incompatible with video_mode)
+            # Use BGR (3ch) to skip per-frame alpha strip
+            self.camera = bettercam.create(output_color="BGR")
             if self.camera is None:
                 raise RuntimeError("摄像头创建失败")
         except Exception as exc:
@@ -2703,8 +2723,95 @@ class VisionViewerApp:
         self.running = True
         self.status_var.set("运行中 (鼠标模式) | 按 Q 关闭预览窗口")
         print("[CAPTURE] Mouse-follow mode: region tracks cursor every frame")
+        self._start_capture_thread()
         self.worker = threading.Thread(target=self.viewer_loop, daemon=True)
         self.worker.start()
+
+    # -------------------------------------------------- capture pipeline
+    def _capture_loop(self):
+        """ZTXAI-style: dedicated capture thread continuously fills a 1-slot queue.
+        Drops the previous frame on overflow so the inference loop always gets the latest."""
+        print("[CAPTURE] capture thread started")
+        while self.running:
+            try:
+                if self._mouse_mode and win32api is not None:
+                    cx, cy = win32api.GetCursorPos()
+                    sw = ctypes.windll.user32.GetSystemMetrics(0)
+                    sh = ctypes.windll.user32.GetSystemMetrics(1)
+                    _ss = self.screenshot_size_var.get()
+                    ml = max(0, min(cx - _ss // 2, sw - _ss))
+                    mt = max(0, min(cy - _ss // 2, sh - _ss))
+                    region = (ml, mt, ml + _ss, mt + _ss)
+                    frame = self.camera.grab(region=region) if self.camera else None
+                else:
+                    region = getattr(self, '_capture_region', None)
+                    frame = self.camera.get_latest_frame() if self.camera else None
+                if frame is None:
+                    time.sleep(0.0005)
+                    continue
+                t_captured = time.perf_counter()
+                # Drop old, push new (overwrite policy)
+                try:
+                    while not self._frame_queue.empty():
+                        self._frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._frame_queue.put_nowait((frame, region, t_captured))
+                except queue.Full:
+                    pass
+            except Exception as e:
+                print(f"[CAPTURE] capture loop error: {e}")
+                time.sleep(0.005)
+        print("[CAPTURE] capture thread exiting")
+
+    def _display_loop(self):
+        """ZTXAI-style: dedicated display thread.
+        cv2.imshow + waitKey can take 5-15ms on Windows due to GUI message pump,
+        so we move it off the inference hot path entirely."""
+        print("[DISPLAY] display thread started")
+        cv_window_created = False
+        while self.running:
+            try:
+                display = self._display_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if display is None:
+                continue
+            try:
+                cv2.imshow("AI Vision Viewer", display)
+                if not cv_window_created:
+                    cv2.setWindowProperty("AI Vision Viewer", cv2.WND_PROP_TOPMOST, 1)
+                    cv_window_created = True
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q")):
+                    self.running = False
+                    break
+            except Exception as e:
+                print(f"[DISPLAY] error: {e}")
+        try:
+            cv2.destroyWindow("AI Vision Viewer")
+        except Exception:
+            pass
+        print("[DISPLAY] display thread exiting")
+
+    def _start_capture_thread(self):
+        """Start (or restart) the dedicated capture + display threads."""
+        # Drain any stale frames from previous session
+        try:
+            while not self._frame_queue.empty():
+                self._frame_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            while not self._display_queue.empty():
+                self._display_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._capture_thread.start()
+        self._display_thread = threading.Thread(target=self._display_loop, daemon=True)
+        self._display_thread.start()
 
     # -------------------------------------------------------- main loop
     def viewer_loop(self):
@@ -2722,9 +2829,18 @@ class VisionViewerApp:
         perf_infer_ms = 0.0
         perf_total_ms = 0.0
         perf_count = 0
+        # Running averages persisted across 1s reset, displayed on preview overlay
+        last_avg_age_ms = 0.0
+        last_avg_infer_ms = 0.0
+        last_avg_total_ms = 0.0
+        last_avg_iter_ms = 0.0
+        last_avg_post_ms = 0.0
+        last_actual_fps = 0
+        # Diagnostic accumulators for per-stage timing
+        perf_iter_ms = 0.0
+        perf_post_ms = 0.0
         render_counter = 0
         RENDER_EVERY_N = 3  # Only render preview every N frames for performance
-        cv_window_created = False
 
         # Recoil spray tracking
         spray_start_time = 0.0   # When left-click started (for bullet index calc)
@@ -2786,25 +2902,18 @@ class VisionViewerApp:
                 mouse_drv = self._mouse_drv
                 self._update_mouse_backend_label(mouse_drv)
 
-            t_frame_start = time.perf_counter()
-            capture_region = None  # (left, top, ...) for overlay coordinate mapping
-            if self._mouse_mode and win32api is not None:
-                # Mouse-follow mode: capture region centered on cursor
-                cx, cy = win32api.GetCursorPos()
-                sw = ctypes.windll.user32.GetSystemMetrics(0)  # screen width
-                sh = ctypes.windll.user32.GetSystemMetrics(1)  # screen height
-                ml = max(0, min(cx - _ss // 2, sw - _ss))
-                mt = max(0, min(cy - _ss // 2, sh - _ss))
-                mouse_region = (ml, mt, ml + _ss, mt + _ss)
-                capture_region = mouse_region
-                frame = self.camera.grab(region=mouse_region) if self.camera else None
-            else:
-                capture_region = getattr(self, '_capture_region', None)
-                frame = self.camera.grab() if self.camera else None
-            if frame is None:
-                time.sleep(0.001)
+            # ZTXAI-style: pull latest frame from dedicated capture thread (1-slot queue)
+            try:
+                frame, capture_region, t_captured = self._frame_queue.get(timeout=0.1)
+            except queue.Empty:
                 continue
+            # t_frame_start = time the frame was actually captured (so capture_ms = frame staleness)
+            t_frame_start = t_captured
             t_capture_done = time.perf_counter()
+            # Initialize t_infer_done so post_ms is always defined even if inference is skipped
+            t_infer_done = t_capture_done
+            if frame is None:
+                continue
 
             image = np.array(frame)
             if image.shape[2] == 4:
@@ -3257,8 +3366,16 @@ class VisionViewerApp:
                         avg_cap = perf_capture_ms / perf_count
                         avg_inf = perf_infer_ms / perf_count
                         avg_tot = perf_total_ms / perf_count
-                        print(f"[PERF] actual_fps={perf_count} capture={avg_cap:.1f}ms infer={avg_inf:.1f}ms total={avg_tot:.1f}ms")
-                        perf_capture_ms = perf_infer_ms = perf_total_ms = 0.0
+                        avg_iter = perf_iter_ms / perf_count
+                        avg_post = perf_post_ms / perf_count
+                        last_avg_age_ms = avg_cap
+                        last_avg_infer_ms = avg_inf
+                        last_avg_total_ms = avg_tot
+                        last_avg_iter_ms = avg_iter
+                        last_avg_post_ms = avg_post
+                        last_actual_fps = perf_count
+                        print(f"[PERF] fps={perf_count} age={avg_cap:.1f} infer={avg_inf:.1f} post={avg_post:.1f} iter={avg_iter:.1f} total(cap->infer)={avg_tot:.1f} ms")
+                        perf_capture_ms = perf_infer_ms = perf_total_ms = perf_iter_ms = perf_post_ms = 0.0
                         perf_count = 0
                     if cur_dyn_fov and len(targets) > 0:
                         _rh = float(max(_ss * 0.4, 40))
@@ -3598,20 +3715,23 @@ class VisionViewerApp:
                 self.root.after(0, self.status_var.set, f"运行中 [{mode_tag}] | FPS: {fps:.1f} | 目标: {len(targets)}")
 
             if do_render and display is not None and show_preview:
-                cv2.putText(display, f"{self.device_name} | FPS:{fps:.0f}", (8, 18),
+                cv2.putText(display, f"{self.device_name} | FPS:{last_actual_fps if last_actual_fps else int(fps)} | total:{last_avg_total_ms:.1f}ms", (8, 18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(display, f"age:{last_avg_age_ms:.1f}ms infer:{last_avg_infer_ms:.1f}ms iter:{last_avg_iter_ms:.1f}ms post:{last_avg_post_ms:.1f}ms", (8, 56),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
                 aim_status = "ON" if aim_on else "OFF"
                 cv2.putText(display, f"Aim:{aim_status} Key:{self.key_var.get()} Target:{cur_target}",
                             (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
-                cv2.imshow("AI Vision Viewer", display)
-                if not cv_window_created:
-                    cv2.setWindowProperty("AI Vision Viewer", cv2.WND_PROP_TOPMOST, 1)
-                    cv_window_created = True
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
-                    break
-            elif not show_preview:
-                # Yield CPU so key polling thread can run reliably
-                time.sleep(0.001)
+                # PERF: push to display thread (overwrite stale frame); cv2.imshow + waitKey runs off the hot path
+                try:
+                    while not self._display_queue.empty():
+                        self._display_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._display_queue.put_nowait(display)
+                except queue.Full:
+                    pass
 
             # --- Overlay drawing ---
             if do_render and use_overlay and self._overlay is not None:
@@ -3641,6 +3761,13 @@ class VisionViewerApp:
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 
+            # ===== End-of-iteration timing =====
+            # iter_ms = time from receiving frame to end of this loop iteration (true 1/FPS)
+            # post_ms = time spent after inference (NMS + aim + render dispatch + overlay)
+            t_iter_end = time.perf_counter()
+            perf_iter_ms += (t_iter_end - t_capture_done) * 1000
+            perf_post_ms += (t_iter_end - t_infer_done) * 1000
+
         mouse_drv.destroy()
         self._cleanup_camera()
         self.root.after(0, self.stop_viewer)
@@ -3664,6 +3791,12 @@ class VisionViewerApp:
         self.worker = None
         if cam is not None:
             try:
+                # Must stop the bg capture thread (started by camera.start()) before release
+                if hasattr(cam, 'is_capturing') and cam.is_capturing:
+                    cam.stop()
+            except Exception as e:
+                print(f"[STOP] camera.stop() error: {e}")
+            try:
                 cam.release()
             except Exception as e:
                 print(f"[STOP] camera.release() error: {e}")
@@ -3679,6 +3812,11 @@ class VisionViewerApp:
         # Now safe to release camera and destroy UI
         try:
             if self.camera is not None:
+                try:
+                    if hasattr(self.camera, 'is_capturing') and self.camera.is_capturing:
+                        self.camera.stop()
+                except Exception:
+                    pass
                 self.camera.release()
                 self.camera = None
         except Exception:
