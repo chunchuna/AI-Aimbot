@@ -2839,8 +2839,27 @@ class VisionViewerApp:
         # Diagnostic accumulators for per-stage timing
         perf_iter_ms = 0.0
         perf_post_ms = 0.0
+        perf_overlay_ms = 0.0
         render_counter = 0
         RENDER_EVERY_N = 3  # Only render preview every N frames for performance
+        # PERF: tkinter Var.get() goes through Tcl interop (~0.05ms each).
+        # 26 var.get() calls per iter ≈ 1.3ms wasted. Cache them, refresh every N iters.
+        cfg_refresh_counter = 0
+        CFG_REFRESH_EVERY = 5  # at 130 FPS that's max ~38ms config-change latency
+        # Pre-bind the 12 hot-path vars (will be (re)assigned inside the loop)
+        use_color_mode = self.color_mode_var.get()
+        cur_fov = self.fov_var.get()
+        cur_dyn_fov = self.dyn_fov_var.get()
+        cur_dyn_fov_min = self.dyn_fov_min_var.get()
+        cur_dyn_fov_max = self.dyn_fov_max_var.get()
+        cur_smooth = self.smooth_var.get()
+        cur_amp = self.amp_var.get()
+        cur_conf = self.conf_var.get()
+        cur_target = TARGET_OPTIONS.get(self.target_var.get(), "head")
+        cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
+        aim_on = self.aim_enabled_var.get()
+        show_preview = self.visuals_var.get()
+        use_overlay = self.overlay_var.get()
 
         # Recoil spray tracking
         spray_start_time = 0.0   # When left-click started (for bullet index calc)
@@ -2915,29 +2934,36 @@ class VisionViewerApp:
             if frame is None:
                 continue
 
-            image = np.array(frame)
-            if image.shape[2] == 4:
+            # PERF: bettercam returns ndarray directly; np.array(...) was a redundant copy.
+            # We set output_color="BGR" so the alpha-strip is dead code now.
+            image = frame
+            if image.ndim == 3 and image.shape[2] == 4:
                 image = image[:, :, :3]
 
-            # ----- Read LIVE config from tkinter vars (real-time, no restart) -----
-            use_color_mode = self.color_mode_var.get()
-            cur_fov = self.fov_var.get()
-            cur_dyn_fov = self.dyn_fov_var.get()
-            cur_dyn_fov_min = self.dyn_fov_min_var.get()
-            cur_dyn_fov_max = self.dyn_fov_max_var.get()
-            cur_smooth = self.smooth_var.get()
-            cur_amp = self.amp_var.get()
-            cur_conf = self.conf_var.get()
-            cur_target = TARGET_OPTIONS.get(self.target_var.get(), "head")
-            cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
-            aim_on = self.aim_enabled_var.get()
-            # Color mode overrides: convert color_smooth (0.05~1.0 multiplier) to smooth divisor
-            if use_color_mode:
-                _cs = self.color_smooth_var.get()
-                cur_smooth = max(1.0 / max(_cs, 0.05), 1.0)
-                cur_amp = 1.0  # color mode doesn't need amp scaling
-            show_preview = self.visuals_var.get()
-            use_overlay = self.overlay_var.get()
+            # ----- Read LIVE config from tkinter vars (cached, refresh every N iter) -----
+            # Each Var.get() goes through Tcl interop; reading 12 of them every iter
+            # costs ~1.3ms. Refresh every CFG_REFRESH_EVERY iterations instead.
+            cfg_refresh_counter += 1
+            if cfg_refresh_counter >= CFG_REFRESH_EVERY:
+                cfg_refresh_counter = 0
+                use_color_mode = self.color_mode_var.get()
+                cur_fov = self.fov_var.get()
+                cur_dyn_fov = self.dyn_fov_var.get()
+                cur_dyn_fov_min = self.dyn_fov_min_var.get()
+                cur_dyn_fov_max = self.dyn_fov_max_var.get()
+                cur_smooth = self.smooth_var.get()
+                cur_amp = self.amp_var.get()
+                cur_conf = self.conf_var.get()
+                cur_target = TARGET_OPTIONS.get(self.target_var.get(), "head")
+                cur_key = KEY_OPTIONS.get(self.key_var.get(), 0x02)
+                aim_on = self.aim_enabled_var.get()
+                show_preview = self.visuals_var.get()
+                use_overlay = self.overlay_var.get()
+                # Color mode overrides: convert color_smooth (0.05~1.0 multiplier) to smooth divisor
+                if use_color_mode:
+                    _cs = self.color_smooth_var.get()
+                    cur_smooth = max(1.0 / max(_cs, 0.05), 1.0)
+                    cur_amp = 1.0  # color mode doesn't need amp scaling
             # Manage overlay lifecycle
             if use_overlay and self._overlay is None:
                 try:
@@ -3012,32 +3038,42 @@ class VisionViewerApp:
 
             else:
                 # ============ AI DETECTION MODE (ONNX) ============
-                # Preprocess — resize to model input size if needed
+                # PERF: read all locked state in one shot (was 3 separate lock acquires)
                 with self._model_lock:
                     model_w, model_h = self._model_input_size
-                cap_h, cap_w = image.shape[:2]
-                if cap_w != model_w or cap_h != model_h:
-                    im_resized = cv2.resize(image, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
-                    scale_x = cap_w / model_w
-                    scale_y = cap_h / model_h
-                else:
-                    im_resized = image
-                    scale_x = 1.0
-                    scale_y = 1.0
-                with self._model_lock:
                     model_dtype = self._model_input_dtype
                     out_fmt = self._model_output_format
                     skip_norm = getattr(self, '_model_skip_normalize', False)
-                if skip_norm:
-                    # Model expects 0-255 raw RGB pixel input (bettercam gives BGR, so convert)
-                    im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype)
-                elif out_fmt == "v8":
-                    # YOLOv8/v11 models are trained on RGB; bettercam gives BGR → convert
-                    im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype) / 255.0
+                cap_h, cap_w = image.shape[:2]
+                scale_x = cap_w / model_w
+                scale_y = cap_h / model_h
+                # PERF: cv2.dnn.blobFromImage is a single C call that does:
+                #   resize -> swap R/B -> scale by 1/255 -> NCHW -> add batch dim -> contiguous float32
+                # Replaces ~6 numpy ops (resize, [:, :, ::-1], expand_dims, astype, /255, moveaxis, ascontiguousarray)
+                # Only usable when output is float32. v11/v8 RGB models match this perfectly.
+                use_blob = (model_dtype == np.float32) and (not skip_norm)
+                if use_blob:
+                    if out_fmt == "v8":
+                        # v8/v11: RGB normalized 0-1
+                        im = cv2.dnn.blobFromImage(image, 1.0 / 255.0, (model_w, model_h),
+                                                   mean=(0, 0, 0), swapRB=True, crop=False)
+                    else:
+                        # v5: BGR normalized 0-1
+                        im = cv2.dnn.blobFromImage(image, 1.0 / 255.0, (model_w, model_h),
+                                                   mean=(0, 0, 0), swapRB=False, crop=False)
                 else:
-                    # YOLOv5 models: keep BGR (YOLOv5 pipeline uses BGR internally)
-                    im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
-                im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
+                    # Fallback path for FP16 / int / skip_norm models
+                    if cap_w != model_w or cap_h != model_h:
+                        im_resized = cv2.resize(image, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
+                    else:
+                        im_resized = image
+                    if skip_norm:
+                        im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype)
+                    elif out_fmt == "v8":
+                        im = np.expand_dims(im_resized[:, :, ::-1], 0).astype(model_dtype) / 255.0
+                    else:
+                        im = np.expand_dims(im_resized, 0).astype(model_dtype) / 255.0
+                    im = np.ascontiguousarray(np.moveaxis(im, 3, 1))
 
                 t_infer_start = time.perf_counter()
                 try:
@@ -3368,14 +3404,15 @@ class VisionViewerApp:
                         avg_tot = perf_total_ms / perf_count
                         avg_iter = perf_iter_ms / perf_count
                         avg_post = perf_post_ms / perf_count
+                        avg_overlay = perf_overlay_ms / perf_count
                         last_avg_age_ms = avg_cap
                         last_avg_infer_ms = avg_inf
                         last_avg_total_ms = avg_tot
                         last_avg_iter_ms = avg_iter
                         last_avg_post_ms = avg_post
                         last_actual_fps = perf_count
-                        print(f"[PERF] fps={perf_count} age={avg_cap:.1f} infer={avg_inf:.1f} post={avg_post:.1f} iter={avg_iter:.1f} total(cap->infer)={avg_tot:.1f} ms")
-                        perf_capture_ms = perf_infer_ms = perf_total_ms = perf_iter_ms = perf_post_ms = 0.0
+                        print(f"[PERF] fps={perf_count} age={avg_cap:.1f} infer={avg_inf:.1f} post={avg_post:.1f} overlay={avg_overlay:.1f} iter={avg_iter:.1f} total(cap->infer)={avg_tot:.1f} ms")
+                        perf_capture_ms = perf_infer_ms = perf_total_ms = perf_iter_ms = perf_post_ms = perf_overlay_ms = 0.0
                         perf_count = 0
                     if cur_dyn_fov and len(targets) > 0:
                         _rh = float(max(_ss * 0.4, 40))
@@ -3748,6 +3785,7 @@ class VisionViewerApp:
                             _ov_fov_r = cur_dyn_fov_max  # no target: show max range
                     elif cur_fov > 0:
                         _ov_fov_r = cur_fov
+                _t_ov_start = time.perf_counter()
                 self._overlay.draw(all_dets, capture_region,
                                    box_thickness=self.ov_box_thickness_var.get(),
                                    box_style=self.ov_box_style_var.get(),
@@ -3758,6 +3796,7 @@ class VisionViewerApp:
                                    dot_color=self.ov_dot_color_var.get(),
                                    hide_label=self.ov_hide_label_var.get(),
                                    fov_radius=_ov_fov_r)
+                perf_overlay_ms += (time.perf_counter() - _t_ov_start) * 1000
             elif not use_overlay and self._overlay is not None:
                 pass  # overlay destroyed above already
 
