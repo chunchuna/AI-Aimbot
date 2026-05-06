@@ -80,6 +80,10 @@ class AimPID:
     when the target is far away or briefly lost.
     """
 
+    # Velocity feedforward: median filter window size and speed threshold
+    VEL_WINDOW = 5          # number of frames for median velocity estimation
+    VEL_SPEED_THRESH = 3.0  # px/frame — below this, target treated as stationary
+
     def __init__(self):
         self._integral_x = 0.0
         self._integral_y = 0.0
@@ -88,6 +92,9 @@ class AimPID:
         self._prev_t = 0.0
         self._initialized = False
         self._frame_count = 0       # for soft-start ramp
+        # Velocity feedforward state
+        self._vel_dx_buf = []       # ring buffer of per-frame delta_x
+        self._vel_dy_buf = []       # ring buffer of per-frame delta_y
 
     def reset(self):
         """Reset PID state (call on target switch or aim key release)."""
@@ -98,20 +105,38 @@ class AimPID:
         self._prev_t = 0.0
         self._initialized = False
         self._frame_count = 0
+        self._vel_dx_buf = []
+        self._vel_dy_buf = []
 
-    def compute(self, error_x, error_y, kp, ki, kd):
-        """Compute PID output for current error.
+    @staticmethod
+    def _median(lst):
+        """Return median of a list (no imports needed)."""
+        s = sorted(lst)
+        n = len(s)
+        if n % 2 == 1:
+            return s[n // 2]
+        return (s[n // 2 - 1] + s[n // 2]) * 0.5
+
+    def compute(self, error_x, error_y, kp, ki, kd, kv=0.0):
+        """Compute PID + velocity-feedforward output for current error.
 
         The key safety invariant: I and D terms are CLAMPED so their combined
         contribution never exceeds the P term's magnitude. This means the PID
         output always points toward the target — it can speed up or slow down
         the approach, but can NEVER push aim AWAY from the target.
 
+        Velocity feedforward (kv > 0):
+        - Estimates target velocity using a median filter over the last N frames
+        - Only activates when median speed exceeds VEL_SPEED_THRESH (static = 0)
+        - Adds kv * median_velocity to the output, predicting where target WILL be
+        - This eliminates the "half-beat lag" on moving targets
+
         Args:
             error_x, error_y: pixel offset from crosshair to target
             kp: proportional gain (like old amp/smooth)
             ki: integral gain
             kd: derivative gain
+            kv: velocity feedforward gain (0 = disabled)
 
         Returns:
             (move_x, move_y): mouse movement in pixels
@@ -124,6 +149,8 @@ class AimPID:
             self._prev_t = now
             self._initialized = True
             self._frame_count = 1
+            self._vel_dx_buf = []
+            self._vel_dy_buf = []
             # First frame: soft-start (20% of P-only) to avoid snap
             return error_x * kp * 0.2, error_y * kp * 0.2
 
@@ -135,6 +162,28 @@ class AimPID:
         self._prev_t = now
 
         RAMP_FRAMES = 10  # soft-start duration
+
+        # --- Velocity feedforward: median-filtered target velocity ---
+        # delta = how much the TARGET moved (in error space) since last frame
+        dx = error_x - self._prev_error_x
+        dy = error_y - self._prev_error_y
+
+        # Append to ring buffer, keep last VEL_WINDOW frames
+        self._vel_dx_buf.append(dx)
+        self._vel_dy_buf.append(dy)
+        if len(self._vel_dx_buf) > self.VEL_WINDOW:
+            self._vel_dx_buf.pop(0)
+            self._vel_dy_buf.pop(0)
+
+        ff_x = 0.0
+        ff_y = 0.0
+        if kv > 0 and len(self._vel_dx_buf) >= 3:
+            med_dx = self._median(self._vel_dx_buf)
+            med_dy = self._median(self._vel_dy_buf)
+            med_speed = (med_dx**2 + med_dy**2) ** 0.5
+            if med_speed > self.VEL_SPEED_THRESH:
+                ff_x = kv * med_dx
+                ff_y = kv * med_dy
 
         # --- P term (always computed) ---
         p_x = kp * error_x
@@ -163,8 +212,8 @@ class AimPID:
         i_y = ki * self._integral_y
 
         # --- Derivative (frame-based) ---
-        deriv_x = error_x - self._prev_error_x
-        deriv_y = error_y - self._prev_error_y
+        deriv_x = dx  # already computed above
+        deriv_y = dy
         self._prev_error_x = error_x
         self._prev_error_y = error_y
 
@@ -189,8 +238,8 @@ class AimPID:
             id_x *= clamp_scale
             id_y *= clamp_scale
 
-        move_x = p_x + id_x
-        move_y = p_y + id_y
+        move_x = p_x + id_x + ff_x
+        move_y = p_y + id_y + ff_y
 
         # Soft-start ramp over first N frames
         if self._frame_count <= RAMP_FRAMES:
@@ -883,6 +932,8 @@ class VisionViewerApp:
         self.aim_ki_var = tk.DoubleVar(value=_read_config_value("aaKi", 0.0, float))
         # Kd (derivative): dampens overshoot / oscillation. 0=no damping.
         self.aim_kd_var = tk.DoubleVar(value=_read_config_value("aaKd", 0.0, float))
+        # Kv (velocity feedforward): predicts moving target position. 0=disabled.
+        self.aim_kv_var = tk.DoubleVar(value=_read_config_value("aaKv", 0.0, float))
         # Mouse backend selection
         _mb_cfg = _read_config_value("mouseBackend", "auto", str)
         self.mouse_backend_var = tk.StringVar(
@@ -1243,6 +1294,14 @@ class VisionViewerApp:
         tk.Scale(right, from_=0.0, to=5.0, orient="horizontal", variable=self.aim_kd_var,
                  resolution=0.1, command=lambda v: self.kd_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
         ttk.Label(right, text="抑制过冲/抖动 0=无阻尼 推荐0.5~2.0", font=("", 8)).pack(anchor="w")
+
+        f_kv = ttk.Frame(right); f_kv.pack(fill="x", pady=1)
+        ttk.Label(f_kv, text="Kv (速度前馈):").pack(side="left")
+        self.kv_label = ttk.Label(f_kv, text=f"{self.aim_kv_var.get():.1f}")
+        self.kv_label.pack(side="right")
+        tk.Scale(right, from_=0.0, to=5.0, orient="horizontal", variable=self.aim_kv_var,
+                 resolution=0.1, command=lambda v: self.kv_label.configure(text=f"{float(v):.1f}")).pack(fill="x")
+        ttk.Label(right, text="预测移动目标位置 0=关闭 推荐0.5~2.0 静止目标不受影响", font=("", 8)).pack(anchor="w")
 
         # --- Mouse backend selector ---
         ttk.Label(right, text="── 鼠标驱动 ──", font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
@@ -1985,6 +2044,7 @@ class VisionViewerApp:
             "aaTargetLockRadius": self.aim_target_lock_radius_var.get(),
             "aaKi": round(self.aim_ki_var.get(), 3),
             "aaKd": round(self.aim_kd_var.get(), 3),
+            "aaKv": round(self.aim_kv_var.get(), 3),
             "mouseBackend": MOUSE_BACKEND_REVERSE.get(self.mouse_backend_var.get(), "auto"),
             "ovBoxThickness": self.ov_box_thickness_var.get(),
             "ovBoxStyle": self.ov_box_style_var.get(),
@@ -2088,6 +2148,8 @@ class VisionViewerApp:
             self.aim_ki_var.set(float(vals["aaKi"]))
         if "aaKd" in vals:
             self.aim_kd_var.set(float(vals["aaKd"]))
+        if "aaKv" in vals:
+            self.aim_kv_var.set(float(vals["aaKv"]))
         if "mouseBackend" in vals:
             _mb = str(vals["mouseBackend"])
             self.mouse_backend_var.set(MOUSE_BACKEND_OPTIONS.get(_mb, MOUSE_BACKEND_OPTIONS["auto"]))
@@ -2664,13 +2726,11 @@ class VisionViewerApp:
         try:
             if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
-            # PERF: BGR (3ch, no alpha) + small buffer; start(video_mode=True) runs capture in bg thread
-            self.camera = bettercam.create(region=region, output_color="BGR", max_buffer_len=2)
+            # PERF: BGR (3ch, no alpha); direct grab() mode (no video_mode) for lowest latency
+            self.camera = bettercam.create(region=region, output_color="BGR")
             if self.camera is None:
                 raise RuntimeError("摄像头创建失败")
-            # PERF: target_fps=0 = uncapped (capture at native refresh rate)
-            self.camera.start(target_fps=0, video_mode=True)
-            print("[CAPTURE] video_mode=True target_fps=0 (uncapped, capture at native refresh)")
+            print("[CAPTURE] direct grab() mode (no video_mode buffer) for lowest latency")
         except Exception as exc:
             self.status_var.set("启动失败")
             messagebox.showerror("启动失败", str(exc))
@@ -2703,13 +2763,11 @@ class VisionViewerApp:
         try:
             if not self.color_mode_var.get() and self.model is None:
                 self.load_model()
-            # PERF: BGR (3ch, no alpha) + small buffer; start(video_mode=True) runs capture in bg thread
-            self.camera = bettercam.create(region=region, output_color="BGR", max_buffer_len=2)
+            # PERF: BGR (3ch, no alpha); direct grab() mode (no video_mode buffer) for lowest latency
+            self.camera = bettercam.create(region=region, output_color="BGR")
             if self.camera is None:
                 raise RuntimeError("摄像头创建失败")
-            # PERF: target_fps=0 = uncapped (capture at native refresh rate)
-            self.camera.start(target_fps=0, video_mode=True)
-            print("[CAPTURE] video_mode=True target_fps=0 (uncapped, capture at native refresh)")
+            print("[CAPTURE] direct grab() mode (no video_mode buffer) for lowest latency")
         except Exception as exc:
             self.status_var.set("启动失败")
             messagebox.showerror("启动失败", str(exc))
@@ -2765,7 +2823,7 @@ class VisionViewerApp:
                     frame = self.camera.grab(region=region) if self.camera else None
                 else:
                     region = getattr(self, '_capture_region', None)
-                    frame = self.camera.get_latest_frame() if self.camera else None
+                    frame = self.camera.grab(region=region) if self.camera else None
                 if frame is None:
                     time.sleep(0.0005)
                     continue
@@ -3711,7 +3769,8 @@ class VisionViewerApp:
                         kp = cur_amp / max(cur_smooth, 1.0) * assist_scale
                         ki = self.aim_ki_var.get() * assist_scale
                         kd = self.aim_kd_var.get() * assist_scale
-                        moveX, moveY = aim_pid.compute(rawX, rawY, kp, ki, kd)
+                        kv = self.aim_kv_var.get() * assist_scale
+                        moveX, moveY = aim_pid.compute(rawX, rawY, kp, ki, kd, kv)
 
                         # Softer clamp for assist
                         assist_max = MAX_PIXEL_DELTA * 0.5
@@ -3745,7 +3804,8 @@ class VisionViewerApp:
                         kp = cur_amp / smooth_div
                         ki = self.aim_ki_var.get()
                         kd = self.aim_kd_var.get()
-                        moveX, moveY = aim_pid.compute(rawX, rawY, kp, ki, kd)
+                        kv = self.aim_kv_var.get()
+                        moveX, moveY = aim_pid.compute(rawX, rawY, kp, ki, kd, kv)
 
                         # Clamp per-frame movement to MAX_PIXEL_DELTA
                         move_mag = (moveX**2 + moveY**2) ** 0.5
