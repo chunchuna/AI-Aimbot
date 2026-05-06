@@ -102,7 +102,7 @@ ovFovCircle = False
 
 # Aim smoothing factor (1.0 = instant snap, higher = smoother/slower)
 # Recommended: 2.0 ~ 5.0 for natural movement
-aaSmoothFactor = 3.8
+aaSmoothFactor = 5.5
 aaFOV = 53
 
 # Dynamic FOV: auto-scale FOV based on target distance (box height)
@@ -113,7 +113,7 @@ aaDynFOVMax = 50
 
 # Crosshair Y offset (pixels) to align AI crosshair with game crosshair
 # Negative = aim higher, Positive = aim lower
-crosshairYOffset = -18
+crosshairYOffset = -8
 
 # Recoil compensation weapon (选择武器名称, "关闭 (Off)" = disabled)
 recoilWeapon = "AK-47"

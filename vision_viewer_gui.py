@@ -1024,18 +1024,19 @@ class VisionViewerApp:
         pw.add(left, weight=3)
 
         top_frame = ttk.Frame(left, padding=8)
-        top_frame.pack(fill=tk.X)
+        top_frame.pack(side=tk.TOP, fill=tk.X)
         ttk.Button(top_frame, text="▶ 全屏启动", command=self.start_viewer_fullscreen).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(top_frame, text="停止", command=self.stop_viewer).pack(side=tk.LEFT, padx=(0, 10))
 
-        # Placeholder for preview area (empty when not running)
-        self._preview_frame = ttk.Frame(left)
-        self._preview_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-
-        bottom = ttk.Frame(left, padding=(8, 0, 8, 8))
-        bottom.pack(fill=tk.X)
+        # Pack bottom bars BEFORE the expand preview so they always get space
+        bottom = ttk.Frame(left, padding=(8, 0, 8, 4))
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
         ttk.Label(bottom, textvariable=self.device_var).pack(side=tk.LEFT)
         ttk.Label(bottom, textvariable=self.status_var).pack(side=tk.RIGHT)
+
+        # Placeholder for preview area — packed LAST so expand eats remaining space
+        self._preview_frame = ttk.Frame(left)
+        self._preview_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
 
         # ===== RIGHT: config panel as Notebook with 5 tabs =====
         right_pane = ttk.Frame(pw, padding=4)
@@ -3561,6 +3562,10 @@ class VisionViewerApp:
                         last_avg_post_ms = avg_post
                         last_actual_fps = perf_count
                         print(f"[PERF] fps={perf_count} age={avg_cap:.1f} infer={avg_inf:.1f} post={avg_post:.1f} overlay={avg_overlay:.1f} iter={avg_iter:.1f} total(cap->infer)={avg_tot:.1f} ms")
+                        # Update GUI status with perf data (same timer ensures values are fresh)
+                        _mode_tag = "找色" if use_color_mode else "AI"
+                        _status_txt = f"运行中 [{_mode_tag}] | FPS: {perf_count} | 延迟: {avg_tot:.1f}ms | 推理: {avg_inf:.1f}ms | 目标: {len(targets)}"
+                        self.root.after(0, self.status_var.set, _status_txt)
                         perf_capture_ms = perf_infer_ms = perf_total_ms = perf_iter_ms = perf_post_ms = perf_overlay_ms = 0.0
                         perf_count = 0
                     if cur_dyn_fov and len(targets) > 0:
@@ -3890,15 +3895,13 @@ class VisionViewerApp:
                 cv2.line(display, (cWidth-10, cy), (cWidth+10, cy), (0, 0, 255), 1)
                 cv2.line(display, (cWidth, cy-10), (cWidth, cy+10), (0, 0, 255), 1)
 
-            # FPS
+            # FPS (frame_count used by HUD overlay; GUI status updated in debug_timer block above)
             frame_count += 1
             now = time.time()
             if now - last_time >= 1.0:
                 fps = frame_count / (now - last_time)
                 frame_count = 0
                 last_time = now
-                mode_tag = "找色" if use_color_mode else "AI"
-                self.root.after(0, self.status_var.set, f"运行中 [{mode_tag}] | FPS: {fps:.1f} | 目标: {len(targets)}")
 
             if do_render and show_preview:
                 # PERF (Tier 8): push raw image + tagged detections to the display thread;
